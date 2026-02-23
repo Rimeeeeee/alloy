@@ -962,7 +962,10 @@ impl ChainConfig {
         scheduled.extend(amsterdam);
 
         scheduled.sort_by_key(|(timestamp, _)| *timestamp);
-
+        tracing::debug!("Cancun of Blob schedule is : {:?}", cancun);
+        tracing::debug!("Prague of Blob schedule is : {:?}", prague);
+        tracing::debug!("Osaka of Blob schedule is : {:?}", prague);
+        tracing::debug!("Rest of Blob schedule is : {:?}", scheduled);
         BlobScheduleBlobParams {
             cancun: cancun.unwrap_or_else(BlobParams::cancun),
             prague: prague.unwrap_or_else(BlobParams::prague),
