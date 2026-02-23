@@ -948,7 +948,7 @@ impl ChainConfig {
                         scheduled.push((timestamp, params));
                     }
                 }
-                "Amsterdam" => {
+                "amsterdam" => {
                     if let Some(timestamp) = self.amsterdam_time {
                         amsterdam = Some((timestamp, params));
                     }
