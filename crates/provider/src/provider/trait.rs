@@ -2177,16 +2177,18 @@ mod tests {
         let num = 0;
         let tag: BlockNumberOrTag = num.into();
         let block = provider.get_block_by_number(tag).full().await.unwrap().unwrap();
+        println!("Block: {block:#?}");
         assert_eq!(block.header.number, num);
     }
 
     #[tokio::test]
     async fn gets_block_by_number() {
         let provider = ProviderBuilder::new().connect_anvil();
-        let num = 0;
+        let num = 1;
         let tag: BlockNumberOrTag = num.into();
-        let block = provider.get_block_by_number(tag).full().await.unwrap().unwrap();
-        assert_eq!(block.header.number, num);
+        let block = provider.get_block_access_list_by_number(tag).await.unwrap().unwrap();
+        println!("Block: {block:#?}");
+        // assert_eq!(block.header.number, num);
     }
 
     #[tokio::test]

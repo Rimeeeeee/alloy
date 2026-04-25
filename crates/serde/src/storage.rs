@@ -4,7 +4,7 @@ use alloy_primitives::{
     Bytes, B256, U256,
 };
 use core::{fmt, str::FromStr};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{de::Error as DeError, Deserialize, Deserializer, Serialize};
 
 /// A storage key type that can be serialized to and from a hex string up to 32 bytes. Used for
 /// `eth_getStorageAt` and `eth_getProof` RPCs.
@@ -26,7 +26,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 ///
 /// The contained [B256] and From implementation for String are used to preserve the input and
 /// implement this behavior from geth.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum JsonStorageKey {
     /// A full 32-byte key (tried first during deserialization)
@@ -81,6 +81,35 @@ impl FromStr for JsonStorageKey {
             return Ok(Self::Hash(hash));
         }
         s.parse().map(Self::Number)
+    }
+}
+
+impl<'de> Deserialize<'de> for JsonStorageKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+
+        // Strip 0x if present
+        let raw = s.strip_prefix("0x").unwrap_or(&s);
+
+        // STRICT length check (max 32 bytes = 64 hex chars)
+        if raw.len() > 64 {
+            return Err(DeError::custom("storage key too long (want at most 32 bytes)"));
+        }
+
+        // Try parsing as B256
+        if let Ok(hash) = B256::from_str(&s) {
+            return Ok(JsonStorageKey::Hash(hash));
+        }
+
+        // Try parsing as U256
+        if let Ok(num) = U256::from_str(&s) {
+            return Ok(JsonStorageKey::Number(num));
+        }
+
+        Err(DeError::custom("Invalid params"))
     }
 }
 
@@ -185,7 +214,8 @@ mod tests {
             "0x0000000000000000000000000000000000000000000000000000000000000abc", // Hash
             "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",   // Number
             "0xabc",                                                              // Number
-            "0xabcd",                                                             // Number
+            "0xabcd",
+            "latest", // Number
             // 0x + 63 hex chars (U256 value, total len = 65)
             "0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", // Number
             // 0x + 64 hex chars (max U256, total len = 66)
@@ -265,6 +295,14 @@ mod tests {
         let key = "0x".to_string() + &"f".repeat(68);
         let result: Result<JsonStorageKey, _> = serde_json::from_str(&json!(key).to_string());
         assert!(result.is_err(), "storage key with 68 hex chars should fail deserialization");
+    }
+
+    #[test]
+    fn test_deserialize_storage_key() {
+        let key = "0x00000000000000000000000000000000000000000000000000000000000000000";
+        let result: Result<JsonStorageKey, _> = serde_json::from_str(&json!(key).to_string());
+
+        assert!(result.is_err(), "storage key with 65 hex chars should fail deserialization");
     }
 
     #[test]
