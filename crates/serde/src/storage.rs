@@ -96,7 +96,7 @@ impl<'de> Deserialize<'de> for JsonStorageKey {
 
         // STRICT length check (max 32 bytes = 64 hex chars)
         if raw.len() > 64 {
-            return Err(DeError::custom("storage key too long (want at most 32 bytes)"));
+            return Err(DeError::custom(""));
         }
 
         // Try parsing as B256
