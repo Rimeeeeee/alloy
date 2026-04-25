@@ -214,8 +214,7 @@ mod tests {
             "0x0000000000000000000000000000000000000000000000000000000000000abc", // Hash
             "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",   // Number
             "0xabc",                                                              // Number
-            "0xabcd",
-            "latest", // Number
+            "0xabcd", // Number
             // 0x + 63 hex chars (U256 value, total len = 65)
             "0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", // Number
             // 0x + 64 hex chars (max U256, total len = 66)
