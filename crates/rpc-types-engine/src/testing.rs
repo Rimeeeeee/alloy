@@ -99,7 +99,7 @@ impl<'de> serde::Deserialize<'de> for TestingBuildBlockRequestV1 {
 #[cfg(all(test, feature = "serde"))]
 mod tests {
     use super::TestingBuildBlockRequestV1;
-    use alloy_primitives::{b256, bytes};
+    use alloy_primitives::{b256, bytes, Bytes};
 
     fn expected_request() -> TestingBuildBlockRequestV1 {
         TestingBuildBlockRequestV1 {
@@ -117,6 +117,10 @@ mod tests {
             transactions: Vec::new(),
             extra_data: Some(bytes!("")),
         }
+    }
+
+    fn request_with_transactions(transactions: Vec<Bytes>, extra_data: Option<Bytes>) -> TestingBuildBlockRequestV1 {
+        TestingBuildBlockRequestV1 { transactions, extra_data, ..expected_request() }
     }
 
     #[test]
@@ -158,6 +162,33 @@ mod tests {
     }
 
     #[test]
+    fn deserialize_testing_build_block_request_v1_from_positional_params_with_transactions() {
+        let request: TestingBuildBlockRequestV1 = serde_json::from_value(serde_json::json!([
+            "0xe27a3e81bd7cfe2aec2cc9e832c73a17c93e7efcf659cf4b39883b96c48708c2",
+            {
+                "parentBeaconBlockRoot": "0xcf8e0d4e9587369b2301d0790347320302cc0943d5a1884365149a42212e8822",
+                "prevRandao": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                "suggestedFeeRecipient": "0x0000000000000000000000000000000000000000",
+                "timestamp": "0x1ce",
+                "withdrawals": []
+            },
+            ["0x02f871870c72dd9d5e883e808201f48405763f58825208947dcd17433742f4c0ca53122ab541d0ba67fc27df8203e880c001a047f09855c4460b5e1377f2198e39e12916ece285a1a68f723057fe9e67763cd6a069c5013dba8cd32bdbb44edd13c0e526977e8216c41151f1907f30ae86a7aa35"],
+            "0x746573745f6e616d65"
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            request,
+            request_with_transactions(
+                vec![bytes!(
+                    "02f871870c72dd9d5e883e808201f48405763f58825208947dcd17433742f4c0ca53122ab541d0ba67fc27df8203e880c001a047f09855c4460b5e1377f2198e39e12916ece285a1a68f723057fe9e67763cd6a069c5013dba8cd32bdbb44edd13c0e526977e8216c41151f1907f30ae86a7aa35"
+                )],
+                Some(bytes!("746573745f6e616d65")),
+            )
+        );
+    }
+
+    #[test]
     fn deserialize_testing_build_block_request_v1_from_object_form() {
         let request: TestingBuildBlockRequestV1 = serde_json::from_value(serde_json::json!({
             "parentBlockHash": "0xe27a3e81bd7cfe2aec2cc9e832c73a17c93e7efcf659cf4b39883b96c48708c2",
@@ -174,5 +205,77 @@ mod tests {
         .unwrap();
 
         assert_eq!(request, expected_request());
+    }
+
+    #[test]
+    fn deserialize_testing_build_block_request_v1_tuple_from_object_form() {
+        let (request,): (TestingBuildBlockRequestV1,) =
+            serde_json::from_value(serde_json::json!([{
+                "parentBlockHash": "0xe27a3e81bd7cfe2aec2cc9e832c73a17c93e7efcf659cf4b39883b96c48708c2",
+                "payloadAttributes": {
+                    "parentBeaconBlockRoot": "0xcf8e0d4e9587369b2301d0790347320302cc0943d5a1884365149a42212e8822",
+                    "prevRandao": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                    "suggestedFeeRecipient": "0x0000000000000000000000000000000000000000",
+                    "timestamp": "0x1ce",
+                    "withdrawals": []
+                },
+                "transactions": null,
+                "extraData": "0x"
+            }]))
+            .unwrap();
+
+        assert_eq!(request, expected_request());
+    }
+
+    #[test]
+    fn deserialize_testing_build_block_request_v1_tuple_from_flat_positional_params_has_expected_error() {
+        let err = serde_json::from_value::<(TestingBuildBlockRequestV1,)>(serde_json::json!([
+            "0xe27a3e81bd7cfe2aec2cc9e832c73a17c93e7efcf659cf4b39883b96c48708c2",
+            {
+                "parentBeaconBlockRoot": "0xcf8e0d4e9587369b2301d0790347320302cc0943d5a1884365149a42212e8822",
+                "prevRandao": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                "suggestedFeeRecipient": "0x0000000000000000000000000000000000000000",
+                "timestamp": "0x1ce",
+                "withdrawals": []
+            },
+            null,
+            "0x"
+        ]))
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "invalid type: string \
+             \"0xe27a3e81bd7cfe2aec2cc9e832c73a17c93e7efcf659cf4b39883b96c48708c2\", \
+             expected a testing_buildBlockV1 request object or params tuple \
+             [parentBlockHash, payloadAttributes, transactions, extraData]"
+        );
+    }
+
+    #[test]
+    fn serialize_testing_build_block_request_v1_tuple_uses_object_form() {
+        let value = serde_json::to_value((request_with_transactions(
+            vec![bytes!(
+                "02f873870c72dd9d5e883e8203e78201f48405763f58825208947dcd17433742f4c0ca53122ab541d0ba67fc27df8203e880c001a08a40061919da0626abab410a2c741747eafb5332fc807b6cda6ce03a8d052aa6a0297cd8770678d9a09282412608e8f8bfa63e80f565c49720ffc7716b36989009"
+            )],
+            Some(bytes!("")),
+        ),))
+        .unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!([{
+                "parentBlockHash": "0xe27a3e81bd7cfe2aec2cc9e832c73a17c93e7efcf659cf4b39883b96c48708c2",
+                "payloadAttributes": {
+                    "parentBeaconBlockRoot": "0xcf8e0d4e9587369b2301d0790347320302cc0943d5a1884365149a42212e8822",
+                    "prevRandao": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                    "suggestedFeeRecipient": "0x0000000000000000000000000000000000000000",
+                    "timestamp": "0x1ce",
+                    "withdrawals": []
+                },
+                "transactions": ["0x02f873870c72dd9d5e883e8203e78201f48405763f58825208947dcd17433742f4c0ca53122ab541d0ba67fc27df8203e880c001a08a40061919da0626abab410a2c741747eafb5332fc807b6cda6ce03a8d052aa6a0297cd8770678d9a09282412608e8f8bfa63e80f565c49720ffc7716b36989009"],
+                "extraData": "0x"
+            }])
+        );
     }
 }
