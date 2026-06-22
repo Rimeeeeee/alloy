@@ -140,6 +140,7 @@ serde = { version = "1.0.226", default-features = false, features = [
     "alloc",
 ] }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+serde_yaml = "0.9"
 serde_with = { version = "3", default-features = false, features = ["macros"] }
 
 # bincode

@@ -1,0 +1,95 @@
+# Structurally valid SSZ vectors that violate Engine API semantic invariants.
+# Every path must reject during decoding; re-encoding mismatches are never expected.
+expected_failures:
+  # Cell and proof lists were randomized independently.
+  - BlobCellsAndProofs/ssz_max/case_0/serialized.ssz
+  - BlobCellsAndProofs/ssz_random/case_0/serialized.ssz
+  - BlobCellsAndProofs/ssz_random/case_1/serialized.ssz
+  - BlobCellsAndProofs/ssz_random_chaos/case_0/serialized.ssz
+  - BlobCellsAndProofs/ssz_random_chaos/case_2/serialized.ssz
+  - BlobCellsAndProofs/ssz_zero/case_0/serialized.ssz
+  - BlobV4Entry/ssz_max/case_0/serialized.ssz
+  - BlobV4Entry/ssz_random/case_0/serialized.ssz
+  - BlobV4Entry/ssz_random/case_2/serialized.ssz
+  - BlobV4Entry/ssz_random_chaos/case_0/serialized.ssz
+  - BlobV4Entry/ssz_random_chaos/case_2/serialized.ssz
+  - BlobV4Entry/ssz_zero/case_0/serialized.ssz
+  - BlobsV4Response/ssz_random/case_0/serialized.ssz
+  - BlobsV4Response/ssz_random/case_1/serialized.ssz
+  - BlobsV4Response/ssz_random_chaos/case_0/serialized.ssz
+  - BlobsV4Response/ssz_random_chaos/case_1/serialized.ssz
+  - BlobsV4Response/ssz_random_chaos/case_2/serialized.ssz
+  - BlobsV4Response/ssz_zero/case_0/serialized.ssz
+
+  # V2 bundle fields were randomized without the required per-blob relationships.
+  - BlobsBundleV2/ssz_max/case_0/serialized.ssz
+  - BlobsBundleV2/ssz_max_count/case_0/serialized.ssz
+  - BlobsBundleV2/ssz_max_count/case_1/serialized.ssz
+  - BlobsBundleV2/ssz_max_count/case_2/serialized.ssz
+  - BlobsBundleV2/ssz_one_count/case_0/serialized.ssz
+  - BlobsBundleV2/ssz_one_count/case_1/serialized.ssz
+  - BlobsBundleV2/ssz_one_count/case_2/serialized.ssz
+  - BlobsBundleV2/ssz_random/case_0/serialized.ssz
+  - BlobsBundleV2/ssz_random/case_1/serialized.ssz
+  - BlobsBundleV2/ssz_random/case_2/serialized.ssz
+  - BlobsBundleV2/ssz_random_chaos/case_0/serialized.ssz
+  - BlobsBundleV2/ssz_random_chaos/case_1/serialized.ssz
+  - BlobsBundleV2/ssz_random_chaos/case_2/serialized.ssz
+  - BlobsBundleV2/ssz_zero/case_0/serialized.ssz
+  - BuiltPayload/Amsterdam/ssz_max/case_0/serialized.ssz
+  - BuiltPayload/Amsterdam/ssz_max_count/case_0/serialized.ssz
+  - BuiltPayload/Amsterdam/ssz_max_count/case_1/serialized.ssz
+  - BuiltPayload/Amsterdam/ssz_max_count/case_2/serialized.ssz
+  - BuiltPayload/Amsterdam/ssz_one_count/case_0/serialized.ssz
+  - BuiltPayload/Amsterdam/ssz_one_count/case_1/serialized.ssz
+  - BuiltPayload/Amsterdam/ssz_one_count/case_2/serialized.ssz
+  - BuiltPayload/Amsterdam/ssz_random/case_0/serialized.ssz
+  - BuiltPayload/Amsterdam/ssz_random/case_1/serialized.ssz
+  - BuiltPayload/Amsterdam/ssz_random/case_2/serialized.ssz
+  - BuiltPayload/Amsterdam/ssz_random_chaos/case_0/serialized.ssz
+  - BuiltPayload/Amsterdam/ssz_random_chaos/case_1/serialized.ssz
+  - BuiltPayload/Amsterdam/ssz_random_chaos/case_2/serialized.ssz
+  - BuiltPayload/Amsterdam/ssz_zero/case_0/serialized.ssz
+  - BuiltPayload/Osaka/ssz_max/case_0/serialized.ssz
+  - BuiltPayload/Osaka/ssz_max_count/case_0/serialized.ssz
+  - BuiltPayload/Osaka/ssz_max_count/case_1/serialized.ssz
+  - BuiltPayload/Osaka/ssz_max_count/case_2/serialized.ssz
+  - BuiltPayload/Osaka/ssz_one_count/case_0/serialized.ssz
+  - BuiltPayload/Osaka/ssz_one_count/case_1/serialized.ssz
+  - BuiltPayload/Osaka/ssz_one_count/case_2/serialized.ssz
+  - BuiltPayload/Osaka/ssz_random/case_0/serialized.ssz
+  - BuiltPayload/Osaka/ssz_random/case_1/serialized.ssz
+  - BuiltPayload/Osaka/ssz_random/case_2/serialized.ssz
+  - BuiltPayload/Osaka/ssz_random_chaos/case_0/serialized.ssz
+  - BuiltPayload/Osaka/ssz_random_chaos/case_1/serialized.ssz
+  - BuiltPayload/Osaka/ssz_random_chaos/case_2/serialized.ssz
+  - BuiltPayload/Osaka/ssz_zero/case_0/serialized.ssz
+
+  # Status bytes or validation-error combinations are outside the Engine API domain.
+  - ForkchoiceUpdateResponse/ssz_max/case_0/serialized.ssz
+  - ForkchoiceUpdateResponse/ssz_max_count/case_0/serialized.ssz
+  - ForkchoiceUpdateResponse/ssz_max_count/case_1/serialized.ssz
+  - ForkchoiceUpdateResponse/ssz_max_count/case_2/serialized.ssz
+  - ForkchoiceUpdateResponse/ssz_nil_count/case_0/serialized.ssz
+  - ForkchoiceUpdateResponse/ssz_one_count/case_0/serialized.ssz
+  - ForkchoiceUpdateResponse/ssz_one_count/case_1/serialized.ssz
+  - ForkchoiceUpdateResponse/ssz_one_count/case_2/serialized.ssz
+  - ForkchoiceUpdateResponse/ssz_random/case_0/serialized.ssz
+  - ForkchoiceUpdateResponse/ssz_random/case_1/serialized.ssz
+  - ForkchoiceUpdateResponse/ssz_random/case_2/serialized.ssz
+  - ForkchoiceUpdateResponse/ssz_random_chaos/case_0/serialized.ssz
+  - ForkchoiceUpdateResponse/ssz_zero/case_0/serialized.ssz
+  - PayloadStatus/ssz_max/case_0/serialized.ssz
+  - PayloadStatus/ssz_max_count/case_0/serialized.ssz
+  - PayloadStatus/ssz_max_count/case_1/serialized.ssz
+  - PayloadStatus/ssz_max_count/case_2/serialized.ssz
+  - PayloadStatus/ssz_nil_count/case_0/serialized.ssz
+  - PayloadStatus/ssz_one_count/case_0/serialized.ssz
+  - PayloadStatus/ssz_one_count/case_1/serialized.ssz
+  - PayloadStatus/ssz_one_count/case_2/serialized.ssz
+  - PayloadStatus/ssz_random/case_0/serialized.ssz
+  - PayloadStatus/ssz_random/case_1/serialized.ssz
+  - PayloadStatus/ssz_random/case_2/serialized.ssz
+  - PayloadStatus/ssz_random_chaos/case_0/serialized.ssz
+  - PayloadStatus/ssz_random_chaos/case_1/serialized.ssz
+  - PayloadStatus/ssz_random_chaos/case_2/serialized.ssz

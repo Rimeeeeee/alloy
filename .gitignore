@@ -1,4 +1,5 @@
 /target
+/ssz_vectors
 /Cargo.lock
 .vscode
 .idea

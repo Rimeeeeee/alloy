@@ -96,6 +96,7 @@ base64.workspace = true
 jsonwebtoken =  { workspace = true, features = ["aws_lc_rs"] }
 rand.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 similar-asserts.workspace = true
 tempfile.workspace = true
 assert_matches.workspace = true

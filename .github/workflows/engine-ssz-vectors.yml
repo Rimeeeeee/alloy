@@ -1,0 +1,54 @@
+name: Engine SSZ vectors
+
+permissions: {}
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/engine-ssz-vectors.yml"
+      - "crates/rpc-types-engine/Cargo.toml"
+      - "crates/rpc-types-engine/src/**"
+      - "crates/rpc-types-engine/tests/**"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  vectors:
+    name: Engine REST-SSZ vectors
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+        with:
+          cache-on-failure: true
+      - name: Download SSZ vectors
+        shell: bash
+        env:
+          SSZ_VECTORS_URL: ${{ vars.SSZ_VECTORS_URL }}
+          SSZ_VECTORS_SHA256: ${{ vars.SSZ_VECTORS_SHA256 }}
+        run: |
+          test -n "$SSZ_VECTORS_URL" || { echo "SSZ_VECTORS_URL is not configured"; exit 1; }
+          test -n "$SSZ_VECTORS_SHA256" || { echo "SSZ_VECTORS_SHA256 is not configured"; exit 1; }
+          mkdir -p target/ssz-vector-fixtures
+          curl --fail --location --retry 3 --show-error \
+            --output target/ssz-vectors.tar.gz \
+            "$SSZ_VECTORS_URL"
+          echo "$SSZ_VECTORS_SHA256  target/ssz-vectors.tar.gz" | sha256sum --check
+          tar -xzf target/ssz-vectors.tar.gz -C target/ssz-vector-fixtures
+          test -f target/ssz-vector-fixtures/ssz_vectors/README.md
+      - name: Test Engine REST-SSZ vectors
+        env:
+          SSZ_VECTOR_DIR: ${{ github.workspace }}/target/ssz-vector-fixtures/ssz_vectors
+        run: >-
+          cargo test -p alloy-rpc-types-engine --features ssz
+          --test ssz_vectors -- --ignored --nocapture
