@@ -76,6 +76,7 @@ type ErrorBytes = VariableList<u8, U1024>;
 ///
 /// This differs from [`Option<T>`]'s `ethereum_ssz` encoding, which uses an SSZ union.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Optional<T>(VariableList<T, U1>);
 
 impl<T> Optional<T> {
@@ -148,6 +149,7 @@ impl<T: ssz::Decode + 'static> ssz::Decode for Optional<T> {
 
 /// Engine API v2 REST-SSZ payload status.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PayloadStatus {
     /// Payload validation status.
     pub status: PayloadStatusEnum,
@@ -367,6 +369,7 @@ pub type WitnessHeaderV1 = VariableList<u8, U1048576>;
 ///
 /// This is a REST-SSZ wire container, not the JSON-RPC debug witness shape.
 #[derive(Clone, Debug, Default, PartialEq, Eq, ssz_derive::Encode, ssz_derive::Decode)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ExecutionWitnessV1 {
     /// Hashed trie-node preimages required during execution and state-root recomputation.
     pub state: VariableList<WitnessNodeV1, U1048576>,
@@ -385,6 +388,7 @@ pub type ExecutionWitness = ExecutionWitnessV1;
 /// belong to the caller. The witness uses the Engine REST-SSZ `Optional[T]` encoding from
 /// execution-apis PR #793 and is present only when the payload status is `VALID`.
 #[derive(Clone, Debug, PartialEq, Eq, ssz_derive::Encode)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PayloadStatusWithWitness {
     /// Result of processing the submitted payload.
     pub payload_status: PayloadStatus,
@@ -458,6 +462,7 @@ impl ssz::Decode for PayloadStatusWithWitness {
 /// This single-field container starts with a four-byte SSZ offset and is not wire-equivalent to a
 /// top-level list.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BlobsV1Request {
     /// Requested versioned blob hashes.
     pub versioned_hashes: VariableList<B256, U128>,
@@ -501,6 +506,7 @@ impl ssz::Decode for BlobsV1Request {
 
 /// V4 blob request container with a packed 128-bit index bitvector.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BlobsV4Request {
     /// Requested versioned blob hashes.
     pub versioned_hashes: VariableList<B256, U128>,
@@ -546,6 +552,7 @@ impl ssz::Decode for BlobsV4Request {
 
 /// Blob response entry with explicit outer availability.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BlobEntry<T> {
     /// Whether the complete blob contents are available.
     pub available: bool,
@@ -613,6 +620,7 @@ impl<T: ssz::Decode> ssz::Decode for BlobEntry<T> {
 
 /// Bounded blob response container.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BlobsResponse<T> {
     /// One response entry per requested hash.
     pub entries: VariableList<BlobEntry<T>, U128>,
@@ -632,6 +640,7 @@ pub type BlobsV4Response = BlobsResponse<BlobCellsAndProofs>;
 /// This uses [`Optional`] (`List[T, 1]`) for per-cell nullability, not Rust [`Option`]'s SSZ
 /// union encoding.
 #[derive(Clone, Debug, Default, PartialEq, Eq, ssz_derive::Encode)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BlobCellsAndProofs {
     /// Requested blob cells.
     pub blob_cells: VariableList<Optional<Cell>, U128>,
@@ -1034,6 +1043,7 @@ impl TryFrom<LegacyPayloadAttributes> for PayloadAttributesAmsterdam {
 ///
 /// Unlike the legacy `engine_getPayloadV1` response, this includes the expected block value.
 #[derive(Clone, Debug, PartialEq, Eq, ssz_derive::Encode, ssz_derive::Decode)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BuiltPayloadParis {
     /// Execution payload V1.
     pub payload: ExecutionPayloadParis,
@@ -1046,6 +1056,7 @@ pub struct BuiltPayloadParis {
 /// This follows the legacy `engine_getPayloadV2` payload-build response shape: execution payload
 /// plus block value only. `should_override_builder` starts at Cancun.
 #[derive(Clone, Debug, PartialEq, Eq, ssz_derive::Encode, ssz_derive::Decode)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BuiltPayloadShanghai {
     /// Execution payload V2.
     pub payload: ExecutionPayloadShanghai,
@@ -1064,6 +1075,7 @@ pub type BuiltPayloadCancun = crate::ExecutionPayloadEnvelopeV3;
 /// Unlike the legacy [`crate::ExecutionPayloadEnvelopeV4`], `execution_requests` precedes
 /// `should_override_builder` in the normative SSZ field order.
 #[derive(Clone, Debug, PartialEq, Eq, ssz_derive::Encode, ssz_derive::Decode)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BuiltPayloadPrague {
     /// Execution payload V3.
     pub payload: ExecutionPayloadPrague,
@@ -1082,6 +1094,7 @@ pub struct BuiltPayloadPrague {
 
 /// This structure maps to the Engine API v2 REST-SSZ payload-build response for Osaka.
 #[derive(Clone, Debug, PartialEq, Eq, ssz_derive::Encode, ssz_derive::Decode)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BuiltPayloadOsaka {
     /// Execution payload V3.
     pub payload: ExecutionPayloadOsaka,
@@ -1100,6 +1113,7 @@ pub struct BuiltPayloadOsaka {
 
 /// This structure maps to the Engine API v2 REST-SSZ payload-build response for Amsterdam.
 #[derive(Clone, Debug, PartialEq, Eq, ssz_derive::Encode, ssz_derive::Decode)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BuiltPayloadAmsterdam {
     /// Execution payload V4.
     pub payload: ExecutionPayloadAmsterdam,
@@ -1235,6 +1249,7 @@ impl From<BuiltPayloadAmsterdam> for LegacyBuiltPayloadAmsterdam {
 
 /// Paris payload-submission request.
 #[derive(Clone, Debug, PartialEq, Eq, ssz_derive::Encode, ssz_derive::Decode)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ExecutionPayloadEnvelopeParis {
     /// Submitted execution payload.
     pub payload: ExecutionPayloadParis,
@@ -1242,6 +1257,7 @@ pub struct ExecutionPayloadEnvelopeParis {
 
 /// Shanghai payload-submission request.
 #[derive(Clone, Debug, PartialEq, Eq, ssz_derive::Encode, ssz_derive::Decode)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ExecutionPayloadEnvelopeShanghai {
     /// Submitted execution payload.
     pub payload: ExecutionPayloadShanghai,
@@ -1249,6 +1265,7 @@ pub struct ExecutionPayloadEnvelopeShanghai {
 
 /// Cancun payload-submission request.
 #[derive(Clone, Debug, PartialEq, Eq, ssz_derive::Encode, ssz_derive::Decode)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ExecutionPayloadEnvelopeCancun {
     /// Submitted execution payload.
     pub payload: ExecutionPayloadCancun,
@@ -1258,6 +1275,7 @@ pub struct ExecutionPayloadEnvelopeCancun {
 
 /// Prague payload-submission request.
 #[derive(Clone, Debug, PartialEq, Eq, ssz_derive::Encode, ssz_derive::Decode)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ExecutionPayloadEnvelopePrague {
     /// Submitted execution payload.
     pub payload: ExecutionPayloadPrague,
@@ -1269,6 +1287,7 @@ pub struct ExecutionPayloadEnvelopePrague {
 
 /// Osaka payload-submission request.
 #[derive(Clone, Debug, PartialEq, Eq, ssz_derive::Encode, ssz_derive::Decode)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ExecutionPayloadEnvelopeOsaka {
     /// Submitted execution payload.
     pub payload: ExecutionPayloadOsaka,
@@ -1283,6 +1302,7 @@ pub struct ExecutionPayloadEnvelopeOsaka {
 /// This is distinct from the legacy [`crate::ExecutionPayloadEnvelopeV6`], which is the
 /// `engine_getPayloadV6` response.
 #[derive(Clone, Debug, PartialEq, Eq, ssz_derive::Encode, ssz_derive::Decode)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ExecutionPayloadEnvelopeAmsterdam {
     /// Submitted execution payload.
     pub payload: ExecutionPayloadAmsterdam,
@@ -1404,6 +1424,7 @@ pub struct ForkchoiceUpdateAmsterdam {
 
 /// Fork-specific execution payload body for Paris.
 #[derive(Clone, Debug, Default, PartialEq, Eq, ssz_derive::Encode, ssz_derive::Decode)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ExecutionPayloadBodyParis {
     /// Enveloped encoded transactions.
     pub transactions: Vec<Bytes>,
@@ -1411,6 +1432,7 @@ pub struct ExecutionPayloadBodyParis {
 
 /// Fork-specific execution payload body for Shanghai.
 #[derive(Clone, Debug, Default, PartialEq, Eq, ssz_derive::Encode, ssz_derive::Decode)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ExecutionPayloadBodyShanghai {
     /// Enveloped encoded transactions.
     pub transactions: Vec<Bytes>,
@@ -1427,6 +1449,7 @@ pub type ExecutionPayloadBodyOsaka = ExecutionPayloadBodyShanghai;
 
 /// Fork-specific execution payload body for Amsterdam.
 #[derive(Clone, Debug, Default, PartialEq, Eq, ssz_derive::Encode, ssz_derive::Decode)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ExecutionPayloadBodyAmsterdam {
     /// Enveloped encoded transactions.
     pub transactions: Vec<Bytes>,
@@ -1526,6 +1549,7 @@ impl TryFrom<LegacyExecutionPayloadBodyV2> for ExecutionPayloadBodyAmsterdam {
 ///
 /// This is a single-field container, not a bare SSZ list.
 #[derive(Clone, Debug, PartialEq, Eq, ssz_derive::Encode, ssz_derive::Decode)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BodiesByHashRequest {
     /// Requested block hashes.
     pub block_hashes: VariableList<B256, U32>,
@@ -1533,6 +1557,7 @@ pub struct BodiesByHashRequest {
 
 /// Historical body response entry with explicit availability.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BodyEntry<T> {
     /// Whether the body is available and belongs to the requested fork.
     pub available: bool,
@@ -1612,6 +1637,7 @@ impl<T: ssz::Decode> ssz::Decode for BodyEntry<T> {
 
 /// Bounded REST-SSZ historical bodies response.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BodiesResponse<T> {
     /// Body entries in request or range order.
     pub entries: VariableList<BodyEntry<T>, U32>,
