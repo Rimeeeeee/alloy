@@ -62,6 +62,8 @@ pub struct HeaderRoots {
     /// The hash of the parent beacon block's root is included in execution blocks, as proposed by
     /// EIP-4788.
     pub parent_beacon_block_root: Option<B256>,
+    /// The sparse Merkle tree root of the warm-access multiset.
+    pub wam_root: Option<B256>,
     /// The Bloom filter composed from indexable information (logger address and log topics)
     /// contained in each log entry from the receipt of each transaction in the transactions list.
     pub logs_bloom: Bloom,
