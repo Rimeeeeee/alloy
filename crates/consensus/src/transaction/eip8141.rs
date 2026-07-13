@@ -4,7 +4,10 @@ use alloy_eips::{
     eip2718::{Eip2718Error, Eip2718Result, IsTyped2718},
     eip7702::SignedAuthorization,
     eip8141::{
-        constants::{FRAME_TX_INTRINSIC_COST, FRAME_TX_PER_FRAME_COST, FRAME_TX_TYPE},
+        constants::{
+            FRAME_TX_DATA_TOKEN_FLOOR_COST, FRAME_TX_DATA_TOKEN_STANDARD_COST,
+            FRAME_TX_INTRINSIC_COST, FRAME_TX_PER_FRAME_COST, FRAME_TX_TYPE,
+        },
         Frame, FrameMode, FrameSignature,
     },
     Decodable2718, Encodable2718, Typed2718,
@@ -13,18 +16,6 @@ use alloy_primitives::{keccak256, Address, Bytes, ChainId, Sealable, TxKind, B25
 use alloy_rlp::{BufMut, Decodable, Encodable, Header};
 
 use crate::Transaction;
-
-static EMPTY_INPUT: Bytes = Bytes::new();
-
-/// Standard gas charged per frame transaction calldata token.
-///
-/// This matches `GasCosts.TX_DATA_TOKEN_STANDARD` in the execution-specs EIP-8141 draft.
-pub const FRAME_TX_DATA_TOKEN_STANDARD_COST: u64 = 4;
-
-/// Floor gas charged per frame transaction calldata token.
-///
-/// This matches `GasCosts.TX_DATA_TOKEN_FLOOR` in the execution-specs EIP-8141 draft.
-pub const FRAME_TX_DATA_TOKEN_FLOOR_COST: u64 = 16;
 
 /// Counts frame transaction calldata tokens.
 ///
@@ -374,6 +365,8 @@ impl Transaction for TxEip8141 {
 
     #[inline]
     fn input(&self) -> &Bytes {
+        static EMPTY_INPUT: Bytes = Bytes::new();
+
         &EMPTY_INPUT
     }
 
