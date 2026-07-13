@@ -211,15 +211,23 @@ impl TxEip8141 {
             .fold(0u64, |acc, signature| acc.saturating_add(signature.verification_gas()))
     }
 
-    /// Returns the EIP-7623/EIP-7976-style token count of encoded frame transaction data.
+    /// Returns the EIP-7623/EIP-7976-style token count of frame transaction data.
     ///
-    /// The encoded signature list and frame list are counted. Zero bytes count as one token and
-    /// non-zero bytes count as four tokens.
+    /// The EIP counts frame calldata and signature byte fields, excluding RLP list metadata and
+    /// non-byte frame fields. Zero bytes count as one token and non-zero bytes count as four
+    /// tokens.
     pub fn frame_calldata_tokens(&self) -> u64 {
-        let mut encoded = Vec::new();
-        self.signatures.encode(&mut encoded);
-        self.frames.encode(&mut encoded);
-        count_frame_data_tokens(&encoded)
+        let frame_data_tokens = self
+            .frames
+            .iter()
+            .fold(0u64, |acc, frame| acc.saturating_add(count_frame_data_tokens(&frame.data)));
+        let signature_data_tokens = self.signatures.iter().fold(0u64, |acc, signature| {
+            acc.saturating_add(count_frame_data_tokens(&signature.signer))
+                .saturating_add(count_frame_data_tokens(&signature.msg))
+                .saturating_add(count_frame_data_tokens(&signature.signature))
+        });
+
+        frame_data_tokens.saturating_add(signature_data_tokens)
     }
 
     /// Calculates the frame transaction gas limit with the provided calldata token gas cost.
@@ -644,10 +652,15 @@ mod tests {
             ..Default::default()
         };
 
-        let mut encoded = Vec::new();
-        tx.signatures.encode(&mut encoded);
-        tx.frames.encode(&mut encoded);
-        let calldata_tokens = count_frame_data_tokens(&encoded);
+        let calldata_tokens = tx
+            .frames
+            .iter()
+            .fold(0u64, |acc, frame| acc.saturating_add(count_frame_data_tokens(&frame.data)))
+            .saturating_add(tx.signatures.iter().fold(0u64, |acc, signature| {
+                acc.saturating_add(count_frame_data_tokens(&signature.signer))
+                    .saturating_add(count_frame_data_tokens(&signature.msg))
+                    .saturating_add(count_frame_data_tokens(&signature.signature))
+            }));
         let expected = FRAME_TX_INTRINSIC_COST
             + 2 * FRAME_TX_PER_FRAME_COST
             + calldata_tokens * FRAME_TX_DATA_TOKEN_STANDARD_COST
