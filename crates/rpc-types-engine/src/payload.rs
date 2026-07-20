@@ -3958,10 +3958,6 @@ pub enum PayloadStatusEnum {
     /// ACCEPTED is returned by the engine API in the following calls:
     ///   - newPayload: if the payload was accepted, but not processed (side chain)
     Accepted,
-
-    /// INCLUSION_LIST_UNSATISFIED is returned by `engine_newPayloadV6` when the payload is valid
-    /// but leaves an appendable inclusion-list transaction out of the block.
-    InclusionListUnsatisfied,
 }
 
 impl PayloadStatusEnum {
@@ -3972,7 +3968,6 @@ impl PayloadStatusEnum {
             Self::Invalid { .. } => "INVALID",
             Self::Syncing => "SYNCING",
             Self::Accepted => "ACCEPTED",
-            Self::InclusionListUnsatisfied => "INCLUSION_LIST_UNSATISFIED",
         }
     }
 
@@ -4006,7 +4001,6 @@ impl PayloadStatusEnum {
             Self::Invalid { .. } => 1,
             Self::Syncing => 2,
             Self::Accepted => 3,
-            Self::InclusionListUnsatisfied => 4,
         }
     }
 
@@ -4039,15 +4033,6 @@ impl PayloadStatusEnum {
                     ));
                 }
                 Ok(Self::Accepted)
-            }
-            4 => {
-                if !validation_error.is_empty() {
-                    return Err(ssz::DecodeError::BytesInvalid(
-                        "unexpected validation error for INCLUSION_LIST_UNSATISFIED status"
-                            .to_string(),
-                    ));
-                }
-                Ok(Self::InclusionListUnsatisfied)
             }
             _ => Err(ssz::DecodeError::BytesInvalid("unknown payload status code".to_string())),
         }
@@ -4563,15 +4548,6 @@ mod tests {
         assert!(status.latest_valid_hash.is_none());
         assert!(status.status.validation_error().is_none());
         assert_eq!(serde_json::to_string(&status).unwrap(), full);
-
-        let status = PayloadStatus {
-            status: PayloadStatusEnum::InclusionListUnsatisfied,
-            latest_valid_hash: None,
-        };
-        assert_eq!(
-            serde_json::to_string(&status).unwrap(),
-            r#"{"status":"INCLUSION_LIST_UNSATISFIED","latestValidHash":null,"validationError":null}"#
-        );
     }
 
     #[test]
@@ -4789,10 +4765,6 @@ mod tests {
             },
             PayloadStatus { status: PayloadStatusEnum::Syncing, latest_valid_hash: None },
             PayloadStatus { status: PayloadStatusEnum::Accepted, latest_valid_hash: None },
-            PayloadStatus {
-                status: PayloadStatusEnum::InclusionListUnsatisfied,
-                latest_valid_hash: None,
-            },
         ];
 
         for status in statuses {
