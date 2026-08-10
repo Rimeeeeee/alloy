@@ -847,6 +847,7 @@ impl ExecutionPayloadV1 {
             requests_hash: None,
             block_access_list_hash: None,
             slot_number: None,
+            wam_root: None,
             extra_data: self.extra_data,
             // Defaults
             ommers_hash: EMPTY_OMMER_ROOT_HASH,

@@ -119,6 +119,9 @@ pub struct AnyHeader {
         )
     )]
     pub slot_number: Option<u64>,
+    /// EIP-8289 warm-access multiset root.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub wam_root: Option<B256>,
 }
 
 impl AnyHeader {
@@ -169,6 +172,7 @@ impl AnyHeader {
             requests_hash,
             block_access_list_hash,
             slot_number,
+            wam_root,
         } = self;
 
         Ok(Header {
@@ -195,6 +199,7 @@ impl AnyHeader {
             requests_hash,
             block_access_list_hash,
             slot_number,
+            wam_root,
         })
     }
 
@@ -226,6 +231,7 @@ impl AnyHeader {
             requests_hash,
             block_access_list_hash,
             slot_number,
+            wam_root,
         } = self;
 
         Header {
@@ -252,6 +258,7 @@ impl AnyHeader {
             requests_hash,
             block_access_list_hash,
             slot_number,
+            wam_root,
         }
     }
 }
@@ -345,6 +352,10 @@ impl BlockHeader for AnyHeader {
         self.slot_number
     }
 
+    fn wam_root(&self) -> Option<B256> {
+        self.wam_root
+    }
+
     fn extra_data(&self) -> &Bytes {
         &self.extra_data
     }
@@ -376,6 +387,7 @@ impl From<Header> for AnyHeader {
             requests_hash,
             block_access_list_hash,
             slot_number,
+            wam_root,
         } = value;
 
         Self {
@@ -402,6 +414,7 @@ impl From<Header> for AnyHeader {
             requests_hash,
             block_access_list_hash,
             slot_number,
+            wam_root,
         }
     }
 }

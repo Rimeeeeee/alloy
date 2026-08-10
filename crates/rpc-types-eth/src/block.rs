@@ -598,6 +598,10 @@ impl<H: BlockHeader> BlockHeader for Header<H> {
         self.inner.slot_number()
     }
 
+    fn wam_root(&self) -> Option<B256> {
+        self.inner.wam_root()
+    }
+
     fn extra_data(&self) -> &Bytes {
         self.inner.extra_data()
     }
@@ -919,6 +923,7 @@ mod tests {
                     requests_hash: None,
                     block_access_list_hash: None,
                     slot_number: None,
+                    wam_root: None,
                 },
                 total_difficulty: Some(U256::from(100000)),
                 size: None,
@@ -968,6 +973,7 @@ mod tests {
                     requests_hash: None,
                     block_access_list_hash: None,
                     slot_number: None,
+                    wam_root: None,
                 },
                 size: None,
                 total_difficulty: Some(U256::from(100000)),
@@ -1015,6 +1021,7 @@ mod tests {
                     requests_hash: None,
                     block_access_list_hash: None,
                     slot_number: None,
+                    wam_root: None,
                 },
                 total_difficulty: Some(U256::from(100000)),
                 size: None,
@@ -1324,6 +1331,7 @@ mod tests {
                 requests_hash: None,
                 block_access_list_hash: None,
                 slot_number: None,
+                wam_root: None,
             },
             size: None,
             total_difficulty: None,
@@ -1372,6 +1380,7 @@ mod tests {
                 requests_hash: None,
                 block_access_list_hash: None,
                 slot_number: None,
+                wam_root: None,
             },
             total_difficulty: None,
             size: Some(U256::from(505)),
@@ -1432,6 +1441,7 @@ mod tests {
                     requests_hash: None,
                     block_access_list_hash: None,
                     slot_number: None,
+                    wam_root: None,
                 },
                 total_difficulty: Some(U256::from(100000)),
                 size: Some(U256::from(19)),

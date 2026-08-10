@@ -153,6 +153,11 @@ pub struct Header {
         )
     )]
     pub slot_number: Option<u64>,
+    /// The sparse Merkle tree root of the warm-access multiset.
+    ///
+    /// [EIP-8289]: https://eips.ethereum.org/EIPS/eip-8289
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub wam_root: Option<B256>,
 }
 
 impl AsRef<Self> for Header {
@@ -187,6 +192,7 @@ impl Default for Header {
             requests_hash: None,
             block_access_list_hash: None,
             slot_number: None,
+            wam_root: None,
         }
     }
 }
@@ -333,6 +339,10 @@ impl Header {
             length += U256::from(slot_number).length();
         }
 
+        if let Some(wam_root) = self.wam_root {
+            length += wam_root.length();
+        }
+
         length
     }
 
@@ -392,6 +402,11 @@ impl Header {
     pub const fn amsterdam_active(&self) -> bool {
         self.block_access_list_hash.is_some()
     }
+
+    /// True if the WAM root field is present.
+    pub const fn wam_active(&self) -> bool {
+        self.wam_root.is_some()
+    }
 }
 
 impl Encodable for Header {
@@ -447,6 +462,10 @@ impl Encodable for Header {
         if let Some(ref slot_number) = self.slot_number {
             U256::from(*slot_number).encode(out);
         }
+
+        if let Some(ref wam_root) = self.wam_root {
+            wam_root.encode(out);
+        }
     }
 
     fn length(&self) -> usize {
@@ -488,6 +507,7 @@ impl Decodable for Header {
             requests_hash: None,
             block_access_list_hash: None,
             slot_number: None,
+            wam_root: None,
         };
         if started_len - buf.len() < rlp_head.payload_length {
             this.base_fee_per_gas = Some(u64::decode(buf)?);
@@ -525,6 +545,11 @@ impl Decodable for Header {
         // Decode slot number.
         if started_len - buf.len() < rlp_head.payload_length {
             this.slot_number = Some(u64::decode(buf)?);
+        }
+
+        // Decode WAM root.
+        if started_len - buf.len() < rlp_head.payload_length {
+            this.wam_root = Some(B256::decode(buf)?);
         }
 
         let consumed = started_len - buf.len();
@@ -571,6 +596,7 @@ impl<'a> arbitrary::Arbitrary<'a> for Header {
             // Amsterdam fields do not yet participate in the hardfork-aware arbitrary model.
             block_access_list_hash: None,
             slot_number: None,
+            wam_root: None,
         })
     }
 }
@@ -613,6 +639,7 @@ pub trait BlockHeader {
             receipts_root: self.receipts_root(),
             withdrawals_root: self.withdrawals_root(),
             parent_beacon_block_root: self.parent_beacon_block_root(),
+            wam_root: self.wam_root(),
             logs_bloom: self.logs_bloom(),
         }
     }
@@ -686,6 +713,11 @@ pub trait BlockHeader {
     ///
     /// [EIP-7843]: https://eips.ethereum.org/EIPS/eip-7843
     fn slot_number(&self) -> Option<u64>;
+
+    /// Retrieves the WAM root of the block, if available.
+    ///
+    /// [EIP-8289]: https://eips.ethereum.org/EIPS/eip-8289
+    fn wam_root(&self) -> Option<B256>;
 
     /// Retrieves the block's extra data field
     fn extra_data(&self) -> &Bytes;
@@ -926,6 +958,10 @@ impl BlockHeader for Header {
         self.slot_number
     }
 
+    fn wam_root(&self) -> Option<B256> {
+        self.wam_root
+    }
+
     fn extra_data(&self) -> &Bytes {
         &self.extra_data
     }
@@ -1021,6 +1057,10 @@ impl<T: BlockHeader> BlockHeader for alloy_serde::WithOtherFields<T> {
         self.inner.slot_number()
     }
 
+    fn wam_root(&self) -> Option<B256> {
+        self.inner.wam_root()
+    }
+
     fn extra_data(&self) -> &Bytes {
         self.inner.extra_data()
     }
@@ -1085,6 +1125,8 @@ pub(crate) mod serde_bincode_compat {
         block_access_list_hash: Option<B256>,
         #[serde(default)]
         slot_number: Option<u64>,
+        #[serde(default)]
+        wam_root: Option<B256>,
         extra_data: Cow<'a, Bytes>,
     }
 
@@ -1113,6 +1155,7 @@ pub(crate) mod serde_bincode_compat {
                 requests_hash: value.requests_hash,
                 block_access_list_hash: value.block_access_list_hash,
                 slot_number: value.slot_number,
+                wam_root: value.wam_root,
                 extra_data: Cow::Borrowed(&value.extra_data),
             }
         }
@@ -1143,6 +1186,7 @@ pub(crate) mod serde_bincode_compat {
                 requests_hash: value.requests_hash,
                 block_access_list_hash: value.block_access_list_hash,
                 slot_number: value.slot_number,
+                wam_root: value.wam_root,
                 extra_data: value.extra_data.into_owned(),
             }
         }
@@ -1235,6 +1279,30 @@ mod tests {
             header.hash_slow(),
             b256!("0x4f05e4392969fc82e41f6d6a8cea379323b0b2d3ddf7def1a33eec03883e3a33")
         );
+    }
+    #[test]
+    fn rlp_roundtrip_with_wam_root() {
+        let wam_root = b256!("0x8289000000000000000000000000000000000000000000000000000000000001");
+        let header = Header {
+            base_fee_per_gas: Some(1),
+            withdrawals_root: Some(EMPTY_ROOT_HASH),
+            blob_gas_used: Some(0),
+            excess_blob_gas: Some(0),
+            parent_beacon_block_root: Some(B256::ZERO),
+            requests_hash: Some(B256::ZERO),
+            block_access_list_hash: Some(B256::ZERO),
+            slot_number: Some(42),
+            wam_root: Some(wam_root),
+            ..Default::default()
+        };
+
+        let encoded = alloy_rlp::encode(&header);
+        let decoded = Header::decode(&mut encoded.as_ref()).unwrap();
+
+        assert_eq!(decoded, header);
+        assert_eq!(decoded.wam_root(), Some(wam_root));
+        assert!(decoded.wam_active());
+        assert_eq!(decoded.header_roots().wam_root, Some(wam_root));
     }
 }
 
