@@ -209,6 +209,7 @@ pub mod beacon_api_payload_attributes {
             parent_beacon_block_root: beacon_api_payload_attributes.parent_beacon_block_root,
             slot_number: beacon_api_payload_attributes.slot_number,
             target_gas_limit: beacon_api_payload_attributes.target_gas_limit,
+            inclusion_list_transactions: None,
         })
     }
 }
@@ -871,6 +872,7 @@ mod tests {
             parent_beacon_block_root: attrs.parent_beacon_block_root,
             slot_number: attrs.slot_number,
             target_gas_limit: attrs.target_gas_limit,
+            inclusion_list_transactions: None,
         };
         assert!(engine_attrs.slot_number.is_none());
         assert!(engine_attrs.target_gas_limit.is_none());
