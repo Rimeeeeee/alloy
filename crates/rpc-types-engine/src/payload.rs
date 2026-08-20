@@ -3536,6 +3536,11 @@ pub struct PayloadAttributes {
         )
     )]
     pub target_gas_limit: Option<u64>,
+    /// Transactions collected from FOCIL inclusion lists for the payload build.
+    ///
+    /// This is introduced with Bogota's `engine_forkchoiceUpdatedV5`.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub inclusion_list_transactions: Option<Vec<Bytes>>,
 }
 
 impl PayloadAttributes {
@@ -3560,6 +3565,12 @@ impl PayloadAttributes {
     /// Sets the slot number for the payload attributes.
     pub const fn with_slot_number(mut self, slot_number: u64) -> Self {
         self.slot_number = Some(slot_number);
+        self
+    }
+
+    /// Sets the FOCIL inclusion-list transactions for the payload build.
+    pub fn with_inclusion_list_transactions(mut self, transactions: Vec<Bytes>) -> Self {
+        self.inclusion_list_transactions = Some(transactions);
         self
     }
 }
@@ -3674,6 +3685,7 @@ impl ssz::Decode for PayloadAttributes {
                 parent_beacon_block_root: None,
                 slot_number: None,
                 target_gas_limit: None,
+                inclusion_list_transactions: None,
             });
         }
 
@@ -3710,6 +3722,7 @@ impl ssz::Decode for PayloadAttributes {
                     parent_beacon_block_root: None,
                     slot_number: None,
                     target_gas_limit: None,
+                    inclusion_list_transactions: None,
                 })
             }
             offset if offset == Self::ssz_v3_fixed_len() => {
@@ -3724,6 +3737,7 @@ impl ssz::Decode for PayloadAttributes {
                     parent_beacon_block_root: Some(decoder.decode_next()?),
                     slot_number: None,
                     target_gas_limit: None,
+                    inclusion_list_transactions: None,
                 })
             }
             offset if offset == Self::ssz_v4_slot_fixed_len() => {
@@ -3739,6 +3753,7 @@ impl ssz::Decode for PayloadAttributes {
                     parent_beacon_block_root: Some(decoder.decode_next()?),
                     slot_number: Some(decoder.decode_next()?),
                     target_gas_limit: None,
+                    inclusion_list_transactions: None,
                 })
             }
             offset if offset == Self::ssz_v4_target_fixed_len() => {
@@ -3755,6 +3770,7 @@ impl ssz::Decode for PayloadAttributes {
                     parent_beacon_block_root: Some(decoder.decode_next()?),
                     slot_number: Some(decoder.decode_next()?),
                     target_gas_limit: Some(decoder.decode_next()?),
+                    inclusion_list_transactions: None,
                 })
             }
             offset => Err(ssz::DecodeError::BytesInvalid(format!(
@@ -4673,6 +4689,57 @@ mod tests {
     }
 
     #[test]
+    fn payload_status_v2_conversions() {
+        let v1 = PayloadStatus::from_status(PayloadStatusEnum::Valid)
+            .with_latest_valid_hash(B256::with_last_byte(1));
+
+        let v2: PayloadStatusV2 = v1.clone().into();
+        assert_eq!(v2.payload_inner, v1);
+        assert_eq!(v2.inclusion_list_satisfied, None);
+
+        let downgraded: PayloadStatus = v2.with_inclusion_list_satisfied(true).into();
+        assert_eq!(downgraded, v1);
+    }
+
+    #[test]
+    fn payload_attributes_builder_setters() {
+        let withdrawal = Withdrawal {
+            index: 1,
+            validator_index: 2,
+            address: Address::with_last_byte(3),
+            amount: 4,
+        };
+        let parent_beacon_block_root = B256::with_last_byte(5);
+
+        let attributes = PayloadAttributes::default()
+            .with_timestamp(10)
+            .with_withdrawals(vec![withdrawal])
+            .with_parent_beacon_block_root(parent_beacon_block_root)
+            .with_slot_number(6)
+            .with_inclusion_list_transactions(vec![Bytes::from_static(&[0x01, 0x02])]);
+
+        assert_eq!(attributes.timestamp, 10);
+        assert_eq!(attributes.withdrawals, Some(vec![withdrawal]));
+        assert_eq!(attributes.parent_beacon_block_root, Some(parent_beacon_block_root));
+        assert_eq!(attributes.slot_number, Some(6));
+        assert_eq!(
+            attributes.inclusion_list_transactions,
+            Some(vec![Bytes::from_static(&[0x01, 0x02])])
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn payload_attributes_serializes_inclusion_list_transactions() {
+        let attributes = PayloadAttributes::default()
+            .with_inclusion_list_transactions(vec![Bytes::from_static(&[0x01, 0x02])]);
+
+        let value = serde_json::to_value(&attributes).unwrap();
+        assert_eq!(value["inclusionListTransactions"], serde_json::json!(["0x0102"]));
+        assert_eq!(serde_json::from_value::<PayloadAttributes>(value).unwrap(), attributes);
+    }
+
+    #[test]
     #[cfg(feature = "ssz")]
     fn ssz_payload_attributes_roundtrip_all_versions() {
         use ssz::{Decode, Encode};
@@ -4692,6 +4759,7 @@ mod tests {
             parent_beacon_block_root: None,
             slot_number: None,
             target_gas_limit: None,
+            inclusion_list_transactions: None,
         };
         let decoded_v1 = PayloadAttributes::from_ssz_bytes(&v1.as_ssz_bytes()).unwrap();
         assert_eq!(decoded_v1, v1);
@@ -4704,6 +4772,7 @@ mod tests {
             parent_beacon_block_root: None,
             slot_number: None,
             target_gas_limit: None,
+            inclusion_list_transactions: None,
         };
         let decoded_v2 = PayloadAttributes::from_ssz_bytes(&v2.as_ssz_bytes()).unwrap();
         assert_eq!(decoded_v2, v2);
@@ -4716,6 +4785,7 @@ mod tests {
             parent_beacon_block_root: Some(B256::with_last_byte(33)),
             slot_number: None,
             target_gas_limit: None,
+            inclusion_list_transactions: None,
         };
         let decoded_v3 = PayloadAttributes::from_ssz_bytes(&v3.as_ssz_bytes()).unwrap();
         assert_eq!(decoded_v3, v3);
@@ -4728,6 +4798,7 @@ mod tests {
             parent_beacon_block_root: Some(B256::with_last_byte(43)),
             slot_number: Some(44),
             target_gas_limit: Some(45),
+            inclusion_list_transactions: None,
         };
         let decoded_v4 = PayloadAttributes::from_ssz_bytes(&v4.as_ssz_bytes()).unwrap();
         assert_eq!(decoded_v4, v4);
@@ -4753,6 +4824,7 @@ mod tests {
             parent_beacon_block_root: None,
             slot_number: None,
             target_gas_limit: None,
+            inclusion_list_transactions: None,
         };
         assert_eq!(v1.as_ssz_bytes().len(), 60);
 
@@ -4764,6 +4836,7 @@ mod tests {
             parent_beacon_block_root: None,
             slot_number: None,
             target_gas_limit: None,
+            inclusion_list_transactions: None,
         };
         let bytes = v2.as_ssz_bytes();
         assert_eq!(u32::from_le_bytes(bytes[60..64].try_into().unwrap()), 64);
@@ -4776,6 +4849,7 @@ mod tests {
             parent_beacon_block_root: Some(B256::with_last_byte(33)),
             slot_number: None,
             target_gas_limit: None,
+            inclusion_list_transactions: None,
         };
         let bytes = v3.as_ssz_bytes();
         assert_eq!(u32::from_le_bytes(bytes[60..64].try_into().unwrap()), 96);
@@ -4788,6 +4862,7 @@ mod tests {
             parent_beacon_block_root: Some(B256::with_last_byte(43)),
             slot_number: Some(44),
             target_gas_limit: Some(45),
+            inclusion_list_transactions: None,
         };
         let bytes = v4.as_ssz_bytes();
         assert_eq!(u32::from_le_bytes(bytes[60..64].try_into().unwrap()), 112);
