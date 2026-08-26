@@ -903,6 +903,28 @@ mod tests {
 
     #[test]
     #[cfg(feature = "serde")]
+    fn serde_json_header_includes_amsterdam_fields() {
+        let block_access_list_hash = B256::with_last_byte(1);
+        let header = Header {
+            inner: alloy_consensus::Header {
+                block_access_list_hash: Some(block_access_list_hash),
+                slot_number: Some(3),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let value = serde_json::to_value(&header).unwrap();
+        assert_eq!(value["blockAccessListHash"], block_access_list_hash.to_string());
+        assert_eq!(value["slotNumber"], "0x3");
+
+        let decoded: Header = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.inner.block_access_list_hash, Some(block_access_list_hash));
+        assert_eq!(decoded.inner.slot_number, Some(3));
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
     fn serde_block() {
         use alloy_primitives::B64;
 
