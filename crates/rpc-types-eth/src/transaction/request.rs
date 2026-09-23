@@ -145,6 +145,19 @@ pub struct TransactionRequest {
     /// Authorization list for EIP-7702 transactions.
     #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
     pub authorization_list: Option<Vec<SignedAuthorization>>,
+    /// Strictly increasing EIP-8250 nonce keys for a frame transaction.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub nonce_keys: Option<Vec<U256>>,
+    /// Sequence shared by all EIP-8250 nonce keys.
+    #[cfg_attr(
+        feature = "serde",
+        serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "alloy_serde::quantity::opt"
+        )
+    )]
+    pub nonce_seq: Option<u64>,
     /// Ordered frames for EIP-8141 frame transactions.
     #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
     pub frames: Option<Vec<Frame>>,
@@ -214,6 +227,8 @@ impl TransactionRequest {
             transaction_type: Some(tx_type),
             sidecar: None,
             authorization_list,
+            nonce_keys: None,
+            nonce_seq: None,
             frames: None,
             signatures: None,
             eip8141_fees: None,
@@ -247,6 +262,18 @@ impl TransactionRequest {
     /// Sets the nonce for the transaction.
     pub const fn nonce(mut self, nonce: u64) -> Self {
         self.nonce = Some(nonce);
+        self
+    }
+
+    /// Sets the EIP-8250 nonce keys for a frame transaction.
+    pub fn nonce_keys(mut self, nonce_keys: Vec<U256>) -> Self {
+        self.nonce_keys = Some(nonce_keys);
+        self
+    }
+
+    /// Sets the EIP-8250 nonce sequence for a frame transaction.
+    pub const fn nonce_seq(mut self, nonce_seq: u64) -> Self {
+        self.nonce_seq = Some(nonce_seq);
         self
     }
 
@@ -711,7 +738,11 @@ impl TransactionRequest {
 
     fn validate_8141_fields(&self) -> Result<(TransactionFees, Option<Vec<B256>>), &'static str> {
         let sender = self.from.ok_or("sender")?;
-        self.nonce.ok_or("nonce")?;
+        let nonce_keys = self.nonce_keys.as_deref().ok_or("nonce_keys")?;
+        let nonce_seq = self.nonce_seq.ok_or("nonce_seq")?;
+        if self.nonce.is_some_and(|nonce| nonce != nonce_seq) {
+            return Err("nonce does not match nonce_seq");
+        }
         let frames = self.frames.as_deref().ok_or("frames")?;
         let signatures = self.signatures.as_deref().ok_or("signatures")?;
         let fees = self.resolved_frame_fees()?;
@@ -731,6 +762,8 @@ impl TransactionRequest {
             ),
         };
         alloy_consensus::transaction::eip8141::TxEip8141Ref {
+            nonce_keys,
+            nonce_seq,
             sender,
             frames,
             signatures,
@@ -761,7 +794,8 @@ impl TransactionRequest {
     fn into_frame_transaction(self, fees: TransactionFees, hashes: Option<Vec<B256>>) -> TxEip8141 {
         TxEip8141 {
             chain_id: self.chain_id.unwrap_or(1),
-            nonce: self.nonce.unwrap_or_default(),
+            nonce_keys: self.nonce_keys.unwrap_or_default(),
+            nonce_seq: self.nonce_seq.unwrap_or_default(),
             sender: self.from.unwrap_or_default(),
             frames: self.frames.unwrap_or_default(),
             signatures: self.signatures.unwrap_or_default(),
@@ -833,6 +867,8 @@ impl TransactionRequest {
         let preferred_type = self.preferred_type();
         if preferred_type != TxType::Eip8141 {
             self.eip8141_fees = None;
+            self.nonce_keys = None;
+            self.nonce_seq = None;
         }
         match preferred_type {
             TxType::Legacy => {
@@ -960,7 +996,11 @@ impl TransactionRequest {
     /// assert_eq!(request.minimal_tx_type(), TxType::Eip4844);
     /// ```
     pub const fn minimal_tx_type(&self) -> TxType {
-        if self.frames.is_some() || self.signatures.is_some() {
+        if self.frames.is_some()
+            || self.signatures.is_some()
+            || self.nonce_keys.is_some()
+            || self.nonce_seq.is_some()
+        {
             TxType::Eip8141
         } else if self.authorization_list.is_some() {
             TxType::Eip7702
@@ -1057,7 +1097,11 @@ impl TransactionRequest {
             return TxType::Eip8141;
         }
 
-        if self.frames.is_some() || self.signatures.is_some() {
+        if self.frames.is_some()
+            || self.signatures.is_some()
+            || self.nonce_keys.is_some()
+            || self.nonce_seq.is_some()
+        {
             TxType::Eip8141
         } else if self.authorization_list.is_some() {
             TxType::Eip7702
@@ -1497,7 +1541,8 @@ impl From<TxEip8141> for TransactionRequest {
         let ty = tx.ty();
         let TxEip8141 {
             chain_id,
-            nonce,
+            nonce_keys,
+            nonce_seq,
             sender,
             frames,
             signatures,
@@ -1510,7 +1555,9 @@ impl From<TxEip8141> for TransactionRequest {
             max_fee_per_gas: fees.max_fee_per_gas.try_into().ok(),
             max_priority_fee_per_gas: fees.max_priority_fee_per_gas.try_into().ok(),
             max_fee_per_blob_gas: fees.max_fee_per_blob_gas.try_into().ok(),
-            nonce: Some(nonce),
+            nonce: Some(nonce_seq),
+            nonce_keys: Some(nonce_keys),
+            nonce_seq: Some(nonce_seq),
             chain_id: Some(chain_id),
             blob_versioned_hashes: Some(blob_versioned_hashes),
             transaction_type: Some(ty),
@@ -1712,6 +1759,10 @@ pub(super) mod serde_bincode_compat {
         /// Authorization list for EIP-7702 transactions.
         pub authorization_list:
             Option<Vec<alloy_eips::eip7702::serde_bincode_compat::SignedAuthorization<'a>>>,
+        /// EIP-8250 nonce keys for frame transactions.
+        pub nonce_keys: Option<Cow<'a, Vec<U256>>>,
+        /// EIP-8250 nonce sequence for frame transactions.
+        pub nonce_seq: Option<u64>,
         /// Ordered frames for EIP-8141 frame transactions.
         pub frames: Option<Cow<'a, Vec<Frame>>>,
         /// Signature entries for EIP-8141 frame transactions.
@@ -1743,6 +1794,8 @@ pub(super) mod serde_bincode_compat {
                     .authorization_list
                     .as_ref()
                     .map(|auths| auths.iter().map(Into::into).collect()),
+                nonce_keys: value.nonce_keys.as_ref().map(Cow::Borrowed),
+                nonce_seq: value.nonce_seq,
                 frames: value.frames.as_ref().map(Cow::Borrowed),
                 signatures: value.signatures.as_ref().map(Cow::Borrowed),
                 eip8141_fees: value.eip8141_fees,
@@ -1776,6 +1829,8 @@ pub(super) mod serde_bincode_compat {
                 authorization_list: value
                     .authorization_list
                     .map(|list| list.into_iter().map(Into::into).collect()),
+                nonce_keys: value.nonce_keys.map(Cow::into_owned),
+                nonce_seq: value.nonce_seq,
                 frames: value.frames.map(Cow::into_owned),
                 signatures: value.signatures.map(Cow::into_owned),
                 eip8141_fees: value.eip8141_fees,
