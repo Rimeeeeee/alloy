@@ -211,6 +211,7 @@ impl serde::Serialize for TxEip8141 {
             nonce_keys: &'a [U256],
             #[serde(with = "alloy_serde::quantity")]
             nonce_seq: u64,
+            #[serde(rename = "from")]
             sender: Address,
             frames: Vec<Frame<'a>>,
             signatures: Vec<Signature<'a>>,
@@ -1348,6 +1349,15 @@ impl TxEip8141Ref<'_> {
     /// method only rejects malformed transactions that must not reach signing, pooling, or
     /// execution.
     pub fn validate(&self) -> Result<(), &'static str> {
+        self.validate_inner(false)
+    }
+
+    /// Validates an unsigned envelope, allowing empty protocol signature placeholders.
+    pub fn validate_unsigned(&self) -> Result<(), &'static str> {
+        self.validate_inner(true)
+    }
+
+    fn validate_inner(&self, allow_placeholders: bool) -> Result<(), &'static str> {
         validate_nonce_keys(self.nonce_keys).map_err(|_| "invalid EIP-8250 nonce keys")?;
         if self.nonce_seq == MAX_NONCE_SEQ {
             return Err("EIP-8250 nonce sequence is exhausted");

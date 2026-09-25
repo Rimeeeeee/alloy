@@ -756,7 +756,14 @@ impl TransactionRequest {
         if self.nonce.is_some_and(|nonce| nonce != nonce_seq) {
             return Err("nonce does not match nonce_seq");
         }
-        let frames = self.frames.as_deref().ok_or("frames")?;
+        let frames: Vec<Frame> = self
+            .frames
+            .as_deref()
+            .ok_or("frames")?
+            .iter()
+            .cloned()
+            .map(Frame::try_from)
+            .collect::<Result<_, _>>()?;
         let signatures = self.signatures.as_deref().ok_or("signatures")?;
         let fees = self.resolved_frame_fees()?;
         let hashes: alloc::borrow::Cow<'_, [B256]> = match &self.sidecar {
@@ -774,7 +781,7 @@ impl TransactionRequest {
                 self.blob_versioned_hashes.as_deref().unwrap_or_default(),
             ),
         };
-        alloy_consensus::transaction::eip8141::TxEip8141Ref {
+        let transaction = alloy_consensus::transaction::eip8141::TxEip8141Ref {
             nonce_keys,
             nonce_seq,
             sender,
@@ -1868,7 +1875,10 @@ pub(super) mod serde_bincode_compat {
                     .map(|auths| auths.iter().map(Into::into).collect()),
                 nonce_keys: value.nonce_keys.as_ref().map(Cow::Borrowed),
                 nonce_seq: value.nonce_seq,
-                frames: value.frames.as_ref().map(Cow::Borrowed),
+                frames: value
+                    .frames
+                    .as_ref()
+                    .map(|frames| frames.iter().map(FrameRequest::from).collect()),
                 signatures: value.signatures.as_ref().map(Cow::Borrowed),
                 eip8141_fees: value.eip8141_fees,
             }
@@ -1903,7 +1913,9 @@ pub(super) mod serde_bincode_compat {
                     .map(|list| list.into_iter().map(Into::into).collect()),
                 nonce_keys: value.nonce_keys.map(Cow::into_owned),
                 nonce_seq: value.nonce_seq,
-                frames: value.frames.map(Cow::into_owned),
+                frames: value
+                    .frames
+                    .map(|frames| frames.into_iter().map(crate::FrameRequest::from).collect()),
                 signatures: value.signatures.map(Cow::into_owned),
                 eip8141_fees: value.eip8141_fees,
             }
