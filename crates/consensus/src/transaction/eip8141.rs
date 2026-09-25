@@ -1,4 +1,4 @@
-use alloc::{borrow::ToOwned, string::ToString, vec::Vec};
+use alloc::{borrow::ToOwned, string::ToString, vec, vec::Vec};
 use core::{fmt, mem::size_of};
 
 use alloy_eips::{
