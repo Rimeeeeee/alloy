@@ -17,6 +17,8 @@ use alloy_rpc_types_eth::TransactionRequest;
 fn frame_tx() -> TxEip8141 {
     TxEip8141 {
         chain_id: 1,
+        nonce_keys: vec![U256::from(1), U256::from(2)],
+        nonce_seq: 7,
         sender: Address::repeat_byte(1),
         frames: vec![Frame::default()],
         fees: TransactionFees {
@@ -112,6 +114,9 @@ fn wide_fees_survive_json_and_rpc_wrappers() {
     assert!(request.max_fee_per_gas.is_none());
     let decoded: TransactionRequest =
         serde_json::from_str(&serde_json::to_string(&request).unwrap()).unwrap();
+    assert_eq!(decoded.nonce_keys, Some(vec![U256::from(1), U256::from(2)]));
+    assert_eq!(decoded.nonce_seq, Some(7));
+    assert_eq!(decoded.nonce, Some(7));
     assert_eq!(decoded.build_8141().unwrap(), tx);
     let rpc = alloy_rpc_types_eth::Transaction {
         inner: Recovered::new_unchecked(tx.clone(), tx.sender),

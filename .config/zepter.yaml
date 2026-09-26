@@ -17,6 +17,9 @@ workflows:
         "--left-side-feature-missing=ignore",
         # Ignore the case that `A` is outside of the workspace. Otherwise it will report errors in external dependencies that we have no influence on.
         "--left-side-outside-workspace=ignore",
+        # alloy-trie does not expose borsh, so these links cannot be propagated.
+        "--ignore-missing-propagate=alloy-consensus/borsh:alloy-trie/borsh",
+        "--ignore-missing-propagate=alloy-genesis/borsh:alloy-trie/borsh",
         # Only check normal dependencies. 
         # Propagating to dev-dependencies leads to compilation issues: https://github.com/alloy-rs/alloy/pull/2144#issuecomment-2702291349
         "--dep-kinds=normal:check,dev:ignore",
