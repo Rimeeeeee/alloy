@@ -1879,6 +1879,7 @@ impl<'de> serde::Deserialize<'de> for BlobsBundleV1 {
         struct BlobsBundleRaw {
             commitments: Vec<alloy_consensus::Bytes48>,
             proofs: Vec<alloy_consensus::Bytes48>,
+            #[serde(deserialize_with = "alloy_eips::eip4844::deserialize_blobs")]
             blobs: Vec<alloy_consensus::Blob>,
         }
         let raw = BlobsBundleRaw::deserialize(deserializer)?;
@@ -2076,6 +2077,7 @@ impl<'de> serde::Deserialize<'de> for BlobsBundleV2 {
         struct BlobsBundleRaw {
             commitments: Vec<alloy_consensus::Bytes48>,
             proofs: Vec<alloy_consensus::Bytes48>,
+            #[serde(deserialize_with = "alloy_eips::eip4844::deserialize_blobs")]
             blobs: Vec<alloy_consensus::Blob>,
         }
         let raw = BlobsBundleRaw::deserialize(deserializer)?;
@@ -2159,6 +2161,64 @@ impl BlobsBundleV2 {
             .iter()
             .map(|c| alloy_eips::eip4844::kzg_to_versioned_hash(c.as_slice()))
             .collect()
+    }
+
+    /// Ensures the bundle has one commitment and [`CELLS_PER_EXT_BLOB`] proofs per blob.
+    ///
+    /// # Errors
+    ///
+    /// Returns a reference to the bundle if its lengths do not match.
+    pub fn ensure_valid_lengths(&self) -> Result<(), alloy_consensus::error::ValueError<&Self>> {
+        let len = self.blobs.len();
+        if self.commitments.len() != len
+            || len.checked_mul(CELLS_PER_EXT_BLOB) != Some(self.proofs.len())
+        {
+            return Err(alloy_consensus::error::ValueError::new_static(self, "length mismatch"));
+        }
+
+        Ok(())
+    }
+
+    /// Partitions blobs by `f`, keeping each blob with its commitment and cell proofs.
+    ///
+    /// Returns the matching bundle first and the non-matching bundle second, preserving order
+    /// within each. The predicate receives each blob's index, blob, commitment, and cell proofs.
+    ///
+    /// # Errors
+    ///
+    /// Returns the original bundle if its blob, commitment, and cell proof lengths do not match.
+    pub fn try_partition_blobs(
+        self,
+        mut f: impl FnMut(usize, &Blob, &Bytes48, &[Bytes48]) -> bool,
+    ) -> Result<(Self, Self), alloy_consensus::error::ValueError<Self>> {
+        if self.ensure_valid_lengths().is_err() {
+            return Err(alloy_consensus::error::ValueError::new_static(self, "length mismatch"));
+        }
+        let Self { blobs, commitments, proofs } = self;
+        let mut matching = Self::empty();
+        let mut non_matching = Self::empty();
+        let mut matches = Vec::with_capacity(blobs.len());
+        let mut commitments = commitments.into_iter();
+
+        for (index, blob) in blobs.into_iter().enumerate() {
+            // The checked lengths guarantee a commitment and proof group for each blob.
+            let commitment = commitments.next().expect("validated commitment length");
+            let start = index * CELLS_PER_EXT_BLOB;
+            let cell_proofs = &proofs[start..start + CELLS_PER_EXT_BLOB];
+            let is_matching = f(index, &blob, &commitment, cell_proofs);
+            matches.push(is_matching);
+            let partition = if is_matching { &mut matching } else { &mut non_matching };
+            partition.blobs.push(blob);
+            partition.commitments.push(commitment);
+        }
+
+        for (index, proof) in proofs.into_iter().enumerate() {
+            let partition =
+                if matches[index / CELLS_PER_EXT_BLOB] { &mut matching } else { &mut non_matching };
+            partition.proofs.push(proof);
+        }
+
+        Ok((matching, non_matching))
     }
 
     /// Take `len` blob data from the bundle.
@@ -4246,6 +4306,69 @@ mod tests {
         let _sidecar = bundle.try_into_sidecar().unwrap();
     }
 
+    fn indexed_v2_bundle() -> BlobsBundleV2 {
+        let mut blobs = vec![Blob::default(); 3];
+        for (index, blob) in blobs.iter_mut().enumerate() {
+            blob[0] = index as u8;
+        }
+        BlobsBundleV2 {
+            blobs,
+            commitments: (0..3).map(|index| Bytes48::new([index; 48])).collect(),
+            proofs: (0..3)
+                .flat_map(|index| vec![Bytes48::new([index; 48]); CELLS_PER_EXT_BLOB])
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn partition_v2_bundle_blobs() {
+        let bundle = indexed_v2_bundle();
+        bundle.ensure_valid_lengths().unwrap();
+
+        let (matching, non_matching) = bundle
+            .try_partition_blobs(|index, blob, commitment, proofs| {
+                assert_eq!(blob[0], index as u8);
+                assert_eq!(*commitment, Bytes48::new([index as u8; 48]));
+                assert!(proofs.iter().all(|proof| proof == commitment));
+                index != 1
+            })
+            .unwrap();
+
+        assert_eq!(matching.blobs.len(), 2);
+        assert_eq!(matching.blobs[0][0], 0);
+        assert_eq!(matching.blobs[1][0], 2);
+        assert_eq!(matching.commitments, vec![Bytes48::new([0; 48]), Bytes48::new([2; 48])]);
+        assert_eq!(matching.proofs.len(), 2 * CELLS_PER_EXT_BLOB);
+        assert!(matching.proofs[..CELLS_PER_EXT_BLOB]
+            .iter()
+            .all(|proof| *proof == Bytes48::new([0; 48])));
+        assert!(matching.proofs[CELLS_PER_EXT_BLOB..]
+            .iter()
+            .all(|proof| *proof == Bytes48::new([2; 48])));
+
+        assert_eq!(non_matching.blobs.len(), 1);
+        assert_eq!(non_matching.blobs[0][0], 1);
+        assert_eq!(non_matching.commitments, vec![Bytes48::new([1; 48])]);
+        assert_eq!(non_matching.proofs, vec![Bytes48::new([1; 48]); CELLS_PER_EXT_BLOB]);
+    }
+
+    #[test]
+    fn partition_v2_bundle_blobs_rejects_mismatched_lengths() {
+        let bundle = BlobsBundleV2 {
+            blobs: vec![Blob::default()],
+            commitments: Vec::new(),
+            proofs: Vec::new(),
+        };
+        assert_eq!(bundle.ensure_valid_lengths().unwrap_err().into_value(), &bundle);
+        let error = bundle.clone().try_partition_blobs(|_, _, _, _| unreachable!()).unwrap_err();
+        assert_eq!(error.value(), &bundle);
+
+        let bundle = BlobsBundleV2 { commitments: vec![Bytes48::default()], ..bundle };
+        assert_eq!(bundle.ensure_valid_lengths().unwrap_err().into_value(), &bundle);
+        let error = bundle.clone().try_partition_blobs(|_, _, _, _| unreachable!()).unwrap_err();
+        assert_eq!(error.value(), &bundle);
+    }
+
     #[test]
     #[cfg(feature = "serde")]
     fn serde_blobsbundlev1_empty() {
@@ -4258,7 +4381,6 @@ mod tests {
 
     #[test]
     #[cfg(feature = "serde")]
-    #[cfg(not(debug_assertions))]
     fn serde_blobsbundlev1_not_empty_pass() {
         let blobs_bundle_v1 = BlobsBundleV1 {
             proofs: vec![Bytes48::default()],
@@ -4267,13 +4389,18 @@ mod tests {
         };
 
         let serialized = serde_json::to_string(&blobs_bundle_v1).unwrap();
-        let deserialized: BlobsBundleV1 = serde_json::from_str(&serialized).unwrap();
+        // Limit the stack to catch large fixed-array temporaries during blob deserialization.
+        let deserialized = std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(move || serde_json::from_str::<BlobsBundleV1>(&serialized).unwrap())
+            .unwrap()
+            .join()
+            .unwrap();
         assert_eq!(deserialized, blobs_bundle_v1);
     }
 
     #[test]
     #[cfg(feature = "serde")]
-    #[cfg(not(debug_assertions))]
     fn serde_blobsbundlev1_not_empty_fail() {
         let blobs_bundle_v1 = BlobsBundleV1 {
             proofs: vec![Bytes48::default(), Bytes48::default()],
@@ -4289,7 +4416,6 @@ mod tests {
 
     #[test]
     #[cfg(feature = "serde")]
-    #[cfg(not(debug_assertions))]
     fn serde_blobsbundlev2_not_empty_pass() {
         let commitments = vec![Bytes48::default()];
 
@@ -4300,13 +4426,18 @@ mod tests {
         };
 
         let serialized = serde_json::to_string(&blobs_bundle_v2).unwrap();
-        let deserialized: BlobsBundleV2 = serde_json::from_str(&serialized).unwrap();
+        // Limit the stack to catch large fixed-array temporaries during blob deserialization.
+        let deserialized = std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(move || serde_json::from_str::<BlobsBundleV2>(&serialized).unwrap())
+            .unwrap()
+            .join()
+            .unwrap();
         assert_eq!(deserialized, blobs_bundle_v2);
     }
 
     #[test]
     #[cfg(feature = "serde")]
-    #[cfg(not(debug_assertions))]
     fn serde_blobsbundlev2_not_empty_fail() {
         let blobs_bundle_v2 = BlobsBundleV2 {
             proofs: vec![Bytes48::default()],
