@@ -12,8 +12,9 @@ use alloy_eips::{
             FRAME_TX_TOTAL_COST_FLOOR_PER_TOKEN, FRAME_TX_TYPE, MAX_FRAMES, MAX_NONCE_SEQ,
             TX_VALUE_COST,
         },
-        validate_nonce_keys, ApprovalScope, Eip8141Error, Frame, FrameMode, FrameSignature,
-        SignatureMessage, TransactionFees,
+        nonce_calldata_len as eip8250_nonce_calldata_len,
+        nonce_calldata_tokens as eip8250_nonce_calldata_tokens, validate_nonce_keys, ApprovalScope,
+        Eip8141Error, Frame, FrameMode, FrameSignature, SignatureMessage, TransactionFees,
     },
     Decodable2718, Encodable2718, Typed2718,
 };
@@ -23,23 +24,6 @@ use alloy_rlp::{BufMut, Decodable, Encodable, Header};
 use crate::Transaction;
 
 static EMPTY_INPUT: Bytes = Bytes::new();
-
-struct NonceKeys<'a>(&'a [U256]);
-
-impl Encodable for NonceKeys<'_> {
-    fn encode(&self, out: &mut dyn BufMut) {
-        let payload_length = self.0.iter().map(Encodable::length).sum();
-        Header { list: true, payload_length }.encode(out);
-        for nonce_key in self.0 {
-            nonce_key.encode(out);
-        }
-    }
-
-    fn length(&self) -> usize {
-        let payload_length = self.0.iter().map(Encodable::length).sum();
-        Header { list: true, payload_length }.length_with_payload()
-    }
-}
 
 struct SigningFrameSignature<'a>(&'a FrameSignature);
 
@@ -95,12 +79,7 @@ impl Encodable for SigningFrameSignatures<'_> {
     }
 }
 
-/// Counts frame transaction calldata tokens.
-///
-/// Zero bytes count as one token and non-zero bytes count as four tokens.
-pub fn count_frame_data_tokens(data: &[u8]) -> u64 {
-    data.iter().fold(0u64, |acc, byte| acc.saturating_add(if *byte == 0 { 1 } else { 4 }))
-}
+pub use alloy_eips::eip8141::count_frame_data_tokens;
 
 /// An EIP-8141 frame transaction.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1529,22 +1508,14 @@ impl TxEip8141Ref<'_> {
         })
     }
 
-    fn encode_nonce_calldata(&self) -> Vec<u8> {
-        let nonce_keys = NonceKeys(self.nonce_keys);
-        let mut encoded = Vec::with_capacity(nonce_keys.length() + self.nonce_seq.length());
-        nonce_keys.encode(&mut encoded);
-        self.nonce_seq.encode(&mut encoded);
-        encoded
-    }
-
     /// Returns the EIP-7623 token count of `rlp(nonce_keys) || rlp(nonce_seq)`.
     pub fn nonce_calldata_tokens(&self) -> u64 {
-        count_frame_data_tokens(&self.encode_nonce_calldata())
+        eip8250_nonce_calldata_tokens(self.nonce_keys, self.nonce_seq)
     }
 
     /// Returns the byte length of `rlp(nonce_keys) || rlp(nonce_seq)`.
     pub fn nonce_calldata_len(&self) -> u64 {
-        (NonceKeys(self.nonce_keys).length() + self.nonce_seq.length()) as u64
+        eip8250_nonce_calldata_len(self.nonce_keys, self.nonce_seq)
     }
 
     /// Returns the EIP-7623 token count of every transaction field priced as calldata.
