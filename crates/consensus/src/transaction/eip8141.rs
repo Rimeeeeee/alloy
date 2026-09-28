@@ -1,4 +1,4 @@
-use alloc::{borrow::ToOwned, string::ToString, vec, vec::Vec};
+use alloc::{borrow::ToOwned, string::ToString, vec::Vec};
 use core::{fmt, mem::size_of};
 
 use alloy_eips::{
@@ -9,12 +9,10 @@ use alloy_eips::{
     eip8141::{
         constants::{
             FRAME_TX_DATA_TOKEN_STANDARD_COST, FRAME_TX_INTRINSIC_COST, FRAME_TX_PER_FRAME_COST,
-            FRAME_TX_TOTAL_COST_FLOOR_PER_TOKEN, FRAME_TX_TYPE, MAX_FRAMES, MAX_NONCE_SEQ,
-            TX_VALUE_COST,
+            FRAME_TX_TOTAL_COST_FLOOR_PER_TOKEN, FRAME_TX_TYPE, MAX_FRAMES, TX_VALUE_COST,
         },
-        nonce_calldata_len as eip8250_nonce_calldata_len,
-        nonce_calldata_tokens as eip8250_nonce_calldata_tokens, validate_nonce_keys, ApprovalScope,
-        Eip8141Error, Frame, FrameMode, FrameSignature, SignatureMessage, TransactionFees,
+        ApprovalScope, Eip8141Error, Frame, FrameMode, FrameSignature, SignatureMessage,
+        TransactionFees,
     },
     Decodable2718, Encodable2718, Typed2718,
 };
@@ -79,19 +77,25 @@ impl Encodable for SigningFrameSignatures<'_> {
     }
 }
 
-pub use alloy_eips::eip8141::count_frame_data_tokens;
+/// Counts frame transaction calldata tokens.
+///
+/// Zero bytes count as one token and non-zero bytes count as four tokens.
+pub fn count_frame_data_tokens(data: &[u8]) -> u64 {
+    data.iter().fold(0u64, |acc, byte| acc.saturating_add(if *byte == 0 { 1 } else { 4 }))
+}
 
 /// An EIP-8141 frame transaction.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(any(test, feature = "arbitrary"), derive(arbitrary::Arbitrary))]
 #[cfg_attr(feature = "borsh", derive(borsh::BorshSerialize, borsh::BorshDeserialize))]
 #[doc(alias = "Eip8141Transaction", alias = "TransactionEip8141", alias = "Eip8141Tx")]
 pub struct TxEip8141 {
     /// EIP-155 replay protection chain ID.
     pub chain_id: ChainId,
-    /// Strictly increasing EIP-8250 nonce keys selected by this transaction.
-    pub nonce_keys: Vec<U256>,
-    /// Sequence shared by all selected nonce keys.
-    pub nonce_seq: u64,
+    /// Shared sequence number, or the legacy sender nonce before EIP-8250.
+    pub nonce: u64,
+    /// EIP-8250 nonce domains. `None` retains the pre-fork wire encoding.
+    pub nonce_keys: Option<Vec<U256>>,
     /// Intended transaction sender.
     pub sender: Address,
     /// Ordered frames to execute.
@@ -102,49 +106,6 @@ pub struct TxEip8141 {
     pub fees: TransactionFees,
     /// Blob versioned hashes.
     pub blob_versioned_hashes: Vec<B256>,
-}
-
-impl Default for TxEip8141 {
-    fn default() -> Self {
-        Self {
-            chain_id: 0,
-            nonce_keys: vec![U256::ZERO],
-            nonce_seq: 0,
-            sender: Address::ZERO,
-            frames: Vec::new(),
-            signatures: Vec::new(),
-            fees: TransactionFees::default(),
-            blob_versioned_hashes: Vec::new(),
-        }
-    }
-}
-
-#[cfg(any(test, feature = "arbitrary"))]
-impl<'a> arbitrary::Arbitrary<'a> for TxEip8141 {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let mut nonce_keys = Vec::<U256>::arbitrary(u)?;
-        nonce_keys.sort_unstable();
-        nonce_keys.dedup();
-        nonce_keys.truncate(alloy_eips::eip8141::MAX_NONCE_KEYS);
-        if nonce_keys.len() > 1 && nonce_keys[0].is_zero() {
-            nonce_keys.remove(0);
-        }
-        if nonce_keys.is_empty() {
-            nonce_keys.push(U256::ZERO);
-        }
-
-        let nonce_seq = u64::arbitrary(u)?;
-        Ok(Self {
-            chain_id: ChainId::arbitrary(u)?,
-            nonce_keys,
-            nonce_seq: if nonce_seq == MAX_NONCE_SEQ { 0 } else { nonce_seq },
-            sender: Address::arbitrary(u)?,
-            frames: Vec::<Frame>::arbitrary(u)?,
-            signatures: Vec::<FrameSignature>::arbitrary(u)?,
-            fees: TransactionFees::arbitrary(u)?,
-            blob_versioned_hashes: Vec::<B256>::arbitrary(u)?,
-        })
-    }
 }
 
 #[cfg(feature = "serde")]
@@ -187,9 +148,10 @@ impl serde::Serialize for TxEip8141 {
         struct Transaction<'a> {
             #[serde(with = "alloy_serde::quantity")]
             chain_id: ChainId,
-            nonce_keys: &'a [U256],
             #[serde(with = "alloy_serde::quantity")]
-            nonce_seq: u64,
+            nonce: u64,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            nonce_keys: Option<Vec<U256>>,
             #[serde(rename = "from")]
             sender: Address,
             frames: Vec<Frame<'a>>,
@@ -205,9 +167,9 @@ impl serde::Serialize for TxEip8141 {
         struct Legacy<'a> {
             #[serde(with = "alloy_serde::quantity")]
             chain_id: ChainId,
-            nonce_keys: &'a [U256],
             #[serde(with = "alloy_serde::quantity")]
-            nonce_seq: u64,
+            nonce: u64,
+            nonce_keys: Option<Vec<U256>>,
             sender: Address,
             frames: &'a [alloy_eips::eip8141::Frame],
             signatures: &'a [alloy_eips::eip8141::FrameSignature],
@@ -218,8 +180,8 @@ impl serde::Serialize for TxEip8141 {
         if !serializer.is_human_readable() {
             return Legacy {
                 chain_id: self.chain_id,
-                nonce_keys: &self.nonce_keys,
-                nonce_seq: self.nonce_seq,
+                nonce: self.nonce,
+                nonce_keys: self.nonce_keys.clone(),
                 sender: self.sender,
                 frames: &self.frames,
                 signatures: &self.signatures,
@@ -257,8 +219,8 @@ impl serde::Serialize for TxEip8141 {
 
         Transaction {
             chain_id: self.chain_id,
-            nonce_keys: &self.nonce_keys,
-            nonce_seq: self.nonce_seq,
+            nonce: self.nonce,
+            nonce_keys: self.nonce_keys.clone(),
             sender: self.sender,
             frames,
             signatures,
@@ -282,9 +244,10 @@ impl<'de> serde::Deserialize<'de> for TxEip8141 {
         struct Transaction {
             #[serde(with = "alloy_serde::quantity")]
             chain_id: ChainId,
-            nonce_keys: Vec<U256>,
             #[serde(with = "alloy_serde::quantity")]
-            nonce_seq: u64,
+            nonce: u64,
+            #[serde(default)]
+            nonce_keys: Option<Vec<U256>>,
             sender: Address,
             frames: Vec<Frame>,
             signatures: Vec<FrameSignature>,
@@ -356,8 +319,8 @@ impl<'de> serde::Deserialize<'de> for TxEip8141 {
         if !deserializer.is_human_readable() {
             return Transaction::deserialize(deserializer).map(|tx| Self {
                 chain_id: tx.chain_id,
+                nonce: tx.nonce,
                 nonce_keys: tx.nonce_keys,
-                nonce_seq: tx.nonce_seq,
                 sender: tx.sender,
                 frames: tx.frames,
                 signatures: tx.signatures,
@@ -371,8 +334,8 @@ impl<'de> serde::Deserialize<'de> for TxEip8141 {
         let tx = serde_json::from_value::<Transaction>(value).map_err(serde::de::Error::custom)?;
         Ok(Self {
             chain_id: tx.chain_id,
+            nonce: tx.nonce,
             nonce_keys: tx.nonce_keys,
-            nonce_seq: tx.nonce_seq,
             sender: tx.sender,
             frames: tx.frames,
             signatures: tx.signatures,
@@ -1054,9 +1017,9 @@ impl TxEip8141 {
     /// Returns a borrowed view for validation and gas accounting.
     pub fn as_frame_ref(&self) -> TxEip8141Ref<'_> {
         TxEip8141Ref {
-            nonce_keys: &self.nonce_keys,
-            nonce_seq: self.nonce_seq,
             sender: self.sender,
+            nonce: self.nonce,
+            nonce_keys: self.nonce_keys.as_deref(),
             frames: &self.frames,
             signatures: &self.signatures,
             fees: &self.fees,
@@ -1073,8 +1036,8 @@ impl TxEip8141 {
     #[doc(hidden)]
     pub fn rlp_encoded_fields_length(&self) -> usize {
         self.chain_id.length()
-            + self.nonce_keys.length()
-            + self.nonce_seq.length()
+            + self.nonce_keys.as_ref().map_or(0, Encodable::length)
+            + self.nonce.length()
             + self.sender.length()
             + self.frames.length()
             + self.signatures.length()
@@ -1085,8 +1048,10 @@ impl TxEip8141 {
     /// Encodes only the transaction fields into the desired buffer, without an RLP header.
     pub fn rlp_encode_fields(&self, out: &mut dyn BufMut) {
         self.chain_id.encode(out);
-        self.nonce_keys.encode(out);
-        self.nonce_seq.encode(out);
+        if let Some(keys) = &self.nonce_keys {
+            keys.encode(out);
+        }
+        self.nonce.encode(out);
         self.sender.encode(out);
         self.frames.encode(out);
         self.signatures.encode(out);
@@ -1097,13 +1062,17 @@ impl TxEip8141 {
     /// Decodes the fields of the transaction from RLP bytes.
     pub fn rlp_decode_fields(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
         let chain_id = Decodable::decode(buf)?;
-        let nonce_keys = Vec::<U256>::decode(buf)?;
-        validate_nonce_keys(&nonce_keys)
-            .map_err(|_| alloy_rlp::Error::Custom("invalid EIP-8250 nonce keys"))?;
+        let nonce_keys = if buf.first().is_some_and(|byte| *byte >= 0xc0) {
+            let keys = Vec::<U256>::decode(buf)?;
+            alloy_eips::eip8141::validate_nonce_keys(&keys).map_err(alloy_rlp::Error::Custom)?;
+            Some(keys)
+        } else {
+            None
+        };
         Ok(Self {
             chain_id,
             nonce_keys,
-            nonce_seq: Decodable::decode(buf)?,
+            nonce: Decodable::decode(buf)?,
             sender: Decodable::decode(buf)?,
             frames: Decodable::decode(buf)?,
             signatures: Decodable::decode(buf)?,
@@ -1146,8 +1115,8 @@ impl TxEip8141 {
         out.put_u8(Self::tx_type());
         let signatures = SigningFrameSignatures(&self.signatures);
         let payload_length = self.chain_id.length()
-            + self.nonce_keys.length()
-            + self.nonce_seq.length()
+            + self.nonce_keys.as_ref().map_or(0, Encodable::length)
+            + self.nonce.length()
             + self.sender.length()
             + self.frames.length()
             + signatures.length()
@@ -1155,8 +1124,10 @@ impl TxEip8141 {
             + self.blob_versioned_hashes.length();
         Header { list: true, payload_length }.encode(out);
         self.chain_id.encode(out);
-        self.nonce_keys.encode(out);
-        self.nonce_seq.encode(out);
+        if let Some(keys) = &self.nonce_keys {
+            keys.encode(out);
+        }
+        self.nonce.encode(out);
         self.sender.encode(out);
         self.frames.encode(out);
         signatures.encode(out);
@@ -1168,8 +1139,8 @@ impl TxEip8141 {
     pub fn payload_len_for_signature(&self) -> usize {
         let signatures = SigningFrameSignatures(&self.signatures);
         let payload_length = self.chain_id.length()
-            + self.nonce_keys.length()
-            + self.nonce_seq.length()
+            + self.nonce_keys.as_ref().map_or(0, Encodable::length)
+            + self.nonce.length()
             + self.sender.length()
             + self.frames.length()
             + signatures.length()
@@ -1249,26 +1220,6 @@ impl TxEip8141 {
         self.as_frame_ref().frame_calldata_len()
     }
 
-    /// See [`TxEip8141Ref::nonce_calldata_tokens`].
-    pub fn nonce_calldata_tokens(&self) -> u64 {
-        self.as_frame_ref().nonce_calldata_tokens()
-    }
-
-    /// See [`TxEip8141Ref::nonce_calldata_len`].
-    pub fn nonce_calldata_len(&self) -> u64 {
-        self.as_frame_ref().nonce_calldata_len()
-    }
-
-    /// See [`TxEip8141Ref::calldata_tokens`].
-    pub fn calldata_tokens(&self) -> u64 {
-        self.as_frame_ref().calldata_tokens()
-    }
-
-    /// See [`TxEip8141Ref::calldata_len`].
-    pub fn calldata_len(&self) -> u64 {
-        self.as_frame_ref().calldata_len()
-    }
-
     /// See [`TxEip8141Ref::calculate_execution_gas_limit_with_token_cost`].
     pub fn calculate_execution_gas_limit_with_token_cost(&self, data_token_cost: u64) -> u64 {
         self.as_frame_ref().calculate_execution_gas_limit_with_token_cost(data_token_cost)
@@ -1293,7 +1244,7 @@ impl TxEip8141 {
     #[inline]
     pub fn size(&self) -> usize {
         size_of::<Self>()
-            + self.nonce_keys.capacity() * size_of::<U256>()
+            + self.nonce_keys.as_ref().map_or(0, |keys| keys.capacity() * size_of::<U256>())
             + self.frames.capacity() * size_of::<Frame>()
             + self.signatures.capacity() * size_of::<FrameSignature>()
             + self.blob_versioned_hashes.capacity() * size_of::<B256>()
@@ -1305,12 +1256,12 @@ impl TxEip8141 {
 /// Borrowed frame fields for allocation-free structural validation and gas accounting.
 #[derive(Clone, Copy, Debug)]
 pub struct TxEip8141Ref<'a> {
-    /// Strictly increasing EIP-8250 nonce keys.
-    pub nonce_keys: &'a [U256],
-    /// Sequence shared by every selected nonce key.
-    pub nonce_seq: u64,
     /// Transaction sender.
     pub sender: Address,
+    /// Shared nonce sequence.
+    pub nonce: u64,
+    /// EIP-8250 nonce domains, absent before activation.
+    pub nonce_keys: Option<&'a [U256]>,
     /// Frame list.
     pub frames: &'a [Frame],
     /// Signature list.
@@ -1337,9 +1288,8 @@ impl TxEip8141Ref<'_> {
     }
 
     fn validate_inner(&self, allow_placeholders: bool) -> Result<(), &'static str> {
-        validate_nonce_keys(self.nonce_keys).map_err(|_| "invalid EIP-8250 nonce keys")?;
-        if self.nonce_seq == MAX_NONCE_SEQ {
-            return Err("EIP-8250 nonce sequence is exhausted");
+        if let Some(keys) = self.nonce_keys {
+            alloy_eips::eip8141::validate_nonce_keys(keys)?;
         }
         if self.frames.is_empty() || self.frames.len() > MAX_FRAMES {
             return Err("EIP-8141 transaction must contain between 1 and 64 frames");
@@ -1490,7 +1440,10 @@ impl TxEip8141Ref<'_> {
             .frames
             .iter()
             .fold(0u64, |acc, frame| acc.saturating_add(count_frame_data_tokens(&frame.data)));
-        self.signatures.iter().fold(frame_tokens, |acc, signature| {
+        let nonce_tokens = self.nonce_keys.map_or(0, |keys| {
+            count_frame_data_tokens(&alloy_eips::eip8141::nonce_calldata(keys, self.nonce))
+        });
+        self.signatures.iter().fold(frame_tokens.saturating_add(nonce_tokens), |acc, signature| {
             acc.saturating_add(count_frame_data_tokens(signature.signer.as_bytes()))
                 .saturating_add(count_frame_data_tokens(signature.msg.as_bytes()))
                 .saturating_add(count_frame_data_tokens(&signature.signature))
@@ -1501,38 +1454,21 @@ impl TxEip8141Ref<'_> {
     pub fn frame_calldata_len(&self) -> u64 {
         let frame_data_len =
             self.frames.iter().fold(0u64, |acc, frame| acc.saturating_add(frame.data.len() as u64));
-        self.signatures.iter().fold(frame_data_len, |acc, signature| {
+        let nonce_len = self
+            .nonce_keys
+            .map_or(0, |keys| alloy_eips::eip8141::nonce_calldata(keys, self.nonce).len() as u64);
+        self.signatures.iter().fold(frame_data_len.saturating_add(nonce_len), |acc, signature| {
             acc.saturating_add(signature.signer.as_bytes().len() as u64)
                 .saturating_add(signature.msg.as_bytes().len() as u64)
                 .saturating_add(signature.signature.len() as u64)
         })
     }
 
-    /// Returns the EIP-7623 token count of `rlp(nonce_keys) || rlp(nonce_seq)`.
-    pub fn nonce_calldata_tokens(&self) -> u64 {
-        eip8250_nonce_calldata_tokens(self.nonce_keys, self.nonce_seq)
-    }
-
-    /// Returns the byte length of `rlp(nonce_keys) || rlp(nonce_seq)`.
-    pub fn nonce_calldata_len(&self) -> u64 {
-        eip8250_nonce_calldata_len(self.nonce_keys, self.nonce_seq)
-    }
-
-    /// Returns the EIP-7623 token count of every transaction field priced as calldata.
-    pub fn calldata_tokens(&self) -> u64 {
-        self.frame_calldata_tokens().saturating_add(self.nonce_calldata_tokens())
-    }
-
-    /// Returns the byte length of every transaction field priced as calldata.
-    pub fn calldata_len(&self) -> u64 {
-        self.frame_calldata_len().saturating_add(self.nonce_calldata_len())
-    }
-
     /// Calculates the execution gas portion with the provided calldata token gas cost.
     pub fn calculate_execution_gas_limit_with_token_cost(&self, data_token_cost: u64) -> u64 {
         FRAME_TX_INTRINSIC_COST
             .saturating_add((self.frames.len() as u64).saturating_mul(FRAME_TX_PER_FRAME_COST))
-            .saturating_add(self.calldata_tokens().saturating_mul(data_token_cost))
+            .saturating_add(self.frame_calldata_tokens().saturating_mul(data_token_cost))
             .saturating_add(self.signature_verification_gas())
             .saturating_add(self.value_transfer_gas())
             .saturating_add(self.total_frame_execution_gas_limit())
@@ -1559,7 +1495,7 @@ impl TxEip8141Ref<'_> {
             .saturating_add(self.value_transfer_gas())
             // EIP-7976 charges every calldata byte as four floor tokens.
             .saturating_add(
-                self.calldata_len()
+                self.frame_calldata_len()
                     .saturating_mul(4)
                     .saturating_mul(FRAME_TX_TOTAL_COST_FLOOR_PER_TOKEN),
             )
@@ -1620,7 +1556,7 @@ impl Transaction for TxEip8141 {
 
     #[inline]
     fn nonce(&self) -> u64 {
-        self.nonce_seq
+        self.nonce
     }
 
     #[inline]
@@ -1757,7 +1693,7 @@ impl Decodable for TxEip8141 {
 /// Bincode-compatible [`TxEip8141`] serde implementation.
 #[cfg(all(feature = "serde", feature = "serde-bincode-compat"))]
 pub(super) mod serde_bincode_compat {
-    use alloc::borrow::Cow;
+    use alloc::{borrow::Cow, vec::Vec};
     use alloy_eips::eip8141::{Frame, FrameSignature, TransactionFees};
     use alloy_primitives::{Address, ChainId, B256, U256};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -1781,8 +1717,8 @@ pub(super) mod serde_bincode_compat {
     #[derive(Debug, Serialize, Deserialize)]
     pub struct TxEip8141<'a> {
         chain_id: ChainId,
-        nonce_keys: Cow<'a, [U256]>,
-        nonce_seq: u64,
+        nonce: u64,
+        nonce_keys: Option<Vec<U256>>,
         sender: Address,
         frames: Cow<'a, [Frame]>,
         signatures: Cow<'a, [FrameSignature]>,
@@ -1794,8 +1730,8 @@ pub(super) mod serde_bincode_compat {
         fn from(value: &'a super::TxEip8141) -> Self {
             Self {
                 chain_id: value.chain_id,
-                nonce_keys: Cow::Borrowed(value.nonce_keys.as_slice()),
-                nonce_seq: value.nonce_seq,
+                nonce: value.nonce,
+                nonce_keys: value.nonce_keys.clone(),
                 sender: value.sender,
                 frames: Cow::Borrowed(value.frames.as_slice()),
                 signatures: Cow::Borrowed(value.signatures.as_slice()),
@@ -1809,8 +1745,8 @@ pub(super) mod serde_bincode_compat {
         fn from(value: TxEip8141<'a>) -> Self {
             Self {
                 chain_id: value.chain_id,
-                nonce_keys: value.nonce_keys.into_owned(),
-                nonce_seq: value.nonce_seq,
+                nonce: value.nonce,
+                nonce_keys: value.nonce_keys,
                 sender: value.sender,
                 frames: value.frames.into_owned(),
                 signatures: value.signatures.into_owned(),
@@ -1885,6 +1821,44 @@ mod tests {
 
     fn valid_tx() -> TxEip8141 {
         TxEip8141 { frames: vec![Frame::default()], ..Default::default() }
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn keyed_nonce_encoding_and_rpc_roundtrip() {
+        use alloy_eips::eip8141::Frame;
+        let legacy =
+            TxEip8141 { chain_id: 1, frames: vec![Frame::default()], ..Default::default() };
+        let mut keyed = legacy.clone();
+        keyed.nonce_keys = Some(vec![U256::from(1), U256::MAX]);
+        keyed.nonce = 128;
+        let encoded = alloy_rlp::encode(&keyed);
+        assert_eq!(TxEip8141::decode(&mut encoded.as_slice()).unwrap(), keyed);
+        let json = serde_json::to_value(&keyed).unwrap();
+        assert_eq!(json["nonce"], "0x80");
+        assert_eq!(json["nonceKeys"][0], "0x1");
+        assert!(json.get("nonceSeq").is_none());
+        assert_eq!(serde_json::from_value::<TxEip8141>(json).unwrap(), keyed);
+        keyed.nonce = 0;
+        keyed.nonce_keys = Some(vec![U256::ZERO]);
+        assert_ne!(keyed.signature_hash(), legacy.signature_hash());
+        assert_eq!(keyed.frame_calldata_tokens(), legacy.frame_calldata_tokens() + 12);
+        assert_eq!(keyed.frame_calldata_len(), legacy.frame_calldata_len() + 3);
+    }
+
+    #[test]
+    fn keyed_nonce_decoder_rejects_noncanonical_sets() {
+        for keys in [
+            vec![],
+            vec![U256::ZERO, U256::from(1)],
+            vec![U256::from(2), U256::from(1)],
+            vec![U256::from(1); 2],
+            (1..=17).map(U256::from).collect(),
+        ] {
+            let tx = TxEip8141 { nonce_keys: Some(keys), ..Default::default() };
+            let encoded = alloy_rlp::encode(&tx);
+            assert!(TxEip8141::decode(&mut encoded.as_slice()).is_err());
+        }
     }
 
     #[test]
@@ -1972,8 +1946,8 @@ mod tests {
     fn encode_decode_roundtrip() {
         let tx = TxEip8141 {
             chain_id: 1,
-            nonce_keys: vec![U256::from(1), U256::from(2)],
-            nonce_seq: 7,
+            nonce: 7,
+            nonce_keys: None,
             sender: Address::from([0x11; 20]),
             frames: vec![Frame {
                 mode: FrameMode::Verify,
@@ -2010,8 +1984,8 @@ mod tests {
     fn json_uses_rpc_frame_fields() {
         let tx = TxEip8141 {
             chain_id: 1,
-            nonce_keys: vec![U256::from(1)],
-            nonce_seq: 2,
+            nonce: 2,
+            nonce_keys: None,
             sender: Address::repeat_byte(0x11),
             frames: vec![Frame {
                 mode: FrameMode::Verify,
@@ -2039,8 +2013,6 @@ mod tests {
         let frame = &json["frames"][0];
         let signature = &json["signatures"][0];
         assert_eq!(json["chainId"], "0x1");
-        assert_eq!(json["nonceKeys"], serde_json::json!(["0x1"]));
-        assert_eq!(json["nonceSeq"], "0x2");
         assert_eq!(frame["mode"], "0x1");
         assert_eq!(frame["flags"], "0x2");
         assert!(frame.get("target").is_none());
@@ -2059,8 +2031,8 @@ mod tests {
     fn signature_hash_elides_transaction_hash_signatures() {
         let mut tx = TxEip8141 {
             chain_id: 1,
-            nonce_keys: vec![U256::from(1)],
-            nonce_seq: 0,
+            nonce: 0,
+            nonce_keys: None,
             sender: Address::from([0x11; 20]),
             frames: Vec::new(),
             signatures: vec![FrameSignature {
@@ -2082,45 +2054,6 @@ mod tests {
         let second = tx.signature_hash();
 
         assert_eq!(first, second);
-    }
-
-    #[test]
-    fn signature_hash_commits_to_nonce_keys_and_sequence() {
-        let tx = TxEip8141 {
-            nonce_keys: vec![U256::from(1), U256::from(2)],
-            nonce_seq: 3,
-            ..Default::default()
-        };
-        let expected = tx.signature_hash();
-
-        let mut changed_keys = tx.clone();
-        changed_keys.nonce_keys[1] = U256::from(3);
-        assert_ne!(changed_keys.signature_hash(), expected);
-
-        let mut changed_sequence = tx;
-        changed_sequence.nonce_seq += 1;
-        assert_ne!(changed_sequence.signature_hash(), expected);
-    }
-
-    #[test]
-    fn rejects_noncanonical_nonce_key_sets_and_exhausted_sequences() {
-        let mut tx = valid_tx();
-        for invalid in [
-            vec![],
-            vec![U256::ZERO, U256::from(1)],
-            vec![U256::from(2), U256::from(2)],
-            vec![U256::from(2), U256::from(1)],
-            vec![U256::from(1); 17],
-        ] {
-            tx.nonce_keys = invalid;
-            assert!(tx.validate().is_err());
-            let encoded = alloy_rlp::encode(&tx);
-            assert!(TxEip8141::decode(&mut encoded.as_ref()).is_err());
-        }
-
-        tx.nonce_keys = vec![U256::from(1)];
-        tx.nonce_seq = MAX_NONCE_SEQ;
-        assert!(tx.validate().is_err());
     }
 
     #[test]
@@ -2253,16 +2186,10 @@ mod tests {
             ..Default::default()
         };
 
-        let mut nonce_calldata = Vec::new();
-        tx.nonce_keys.encode(&mut nonce_calldata);
-        tx.nonce_seq.encode(&mut nonce_calldata);
-        let frame_calldata_tokens = count_frame_data_tokens(&[0, 1, 2])
+        let calldata_tokens = count_frame_data_tokens(&[0, 1, 2])
             + count_frame_data_tokens(&[0x11; 20])
             + count_frame_data_tokens(&[0x22; 65]);
-        let frame_calldata_len = 3 + 20 + 65;
-        let nonce_calldata_tokens = count_frame_data_tokens(&nonce_calldata);
-        let calldata_tokens = frame_calldata_tokens + nonce_calldata_tokens;
-        let calldata_len = frame_calldata_len + nonce_calldata.len() as u64;
+        let calldata_len = 3 + 20 + 65;
         let expected = FRAME_TX_INTRINSIC_COST
             + 2 * FRAME_TX_PER_FRAME_COST
             + calldata_tokens * FRAME_TX_DATA_TOKEN_STANDARD_COST
@@ -2273,12 +2200,8 @@ mod tests {
         assert_eq!(tx.total_frame_execution_gas_limit(), 30);
         assert_eq!(tx.total_frame_state_gas_limit(), 7);
         assert_eq!(tx.signature_verification_gas(), 2_800);
-        assert_eq!(tx.frame_calldata_tokens(), frame_calldata_tokens);
-        assert_eq!(tx.frame_calldata_len(), frame_calldata_len);
-        assert_eq!(tx.nonce_calldata_tokens(), nonce_calldata_tokens);
-        assert_eq!(tx.nonce_calldata_len(), nonce_calldata.len() as u64);
-        assert_eq!(tx.calldata_tokens(), calldata_tokens);
-        assert_eq!(tx.calldata_len(), calldata_len);
+        assert_eq!(tx.frame_calldata_tokens(), calldata_tokens);
+        assert_eq!(tx.frame_calldata_len(), calldata_len);
         let floor = FRAME_TX_INTRINSIC_COST
             + 2 * FRAME_TX_PER_FRAME_COST
             + 2_800
@@ -2290,7 +2213,7 @@ mod tests {
     }
 
     #[test]
-    fn only_nonce_and_variable_frame_fields_are_charged_as_calldata() {
+    fn fixed_fields_and_rlp_headers_are_not_charged_as_calldata() {
         let tx = TxEip8141 {
             frames: vec![Frame {
                 mode: FrameMode::Sender,
@@ -2306,13 +2229,9 @@ mod tests {
 
         assert_eq!(tx.frame_calldata_tokens(), 0);
         assert_eq!(tx.frame_calldata_len(), 0);
-        assert_ne!(tx.nonce_calldata_tokens(), 0);
         assert_eq!(
             tx.calculate_calldata_floor(),
-            FRAME_TX_INTRINSIC_COST
-                + FRAME_TX_PER_FRAME_COST
-                + TX_VALUE_COST
-                + tx.nonce_calldata_len() * 4 * FRAME_TX_TOTAL_COST_FLOOR_PER_TOKEN
+            FRAME_TX_INTRINSIC_COST + FRAME_TX_PER_FRAME_COST + TX_VALUE_COST
         );
     }
 }

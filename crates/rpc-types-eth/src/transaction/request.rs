@@ -105,6 +105,9 @@ pub struct TransactionRequest {
         )
     )]
     pub nonce: Option<u64>,
+    /// EIP-8250 nonce domains sharing the `nonce` sequence.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub nonce_keys: Option<Vec<U256>>,
     /// The chain ID for the transaction.
     #[cfg_attr(
         feature = "serde",
@@ -145,19 +148,6 @@ pub struct TransactionRequest {
     /// Authorization list for EIP-7702 transactions.
     #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
     pub authorization_list: Option<Vec<SignedAuthorization>>,
-    /// Strictly increasing EIP-8250 nonce keys for a frame transaction.
-    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
-    pub nonce_keys: Option<Vec<U256>>,
-    /// Sequence shared by all EIP-8250 nonce keys.
-    #[cfg_attr(
-        feature = "serde",
-        serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            with = "alloy_serde::quantity::opt"
-        )
-    )]
-    pub nonce_seq: Option<u64>,
     /// Ordered frames for EIP-8141 frame transactions.
     #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
     pub frames: Option<Vec<FrameRequest>>,
@@ -241,7 +231,6 @@ impl TransactionRequest {
             sidecar: None,
             authorization_list,
             nonce_keys: None,
-            nonce_seq: None,
             frames: None,
             signatures: None,
             eip8141_fees: None,
@@ -275,18 +264,6 @@ impl TransactionRequest {
     /// Sets the nonce for the transaction.
     pub const fn nonce(mut self, nonce: u64) -> Self {
         self.nonce = Some(nonce);
-        self
-    }
-
-    /// Sets the EIP-8250 nonce keys for a frame transaction.
-    pub fn nonce_keys(mut self, nonce_keys: Vec<U256>) -> Self {
-        self.nonce_keys = Some(nonce_keys);
-        self
-    }
-
-    /// Sets the EIP-8250 nonce sequence for a frame transaction.
-    pub const fn nonce_seq(mut self, nonce_seq: u64) -> Self {
-        self.nonce_seq = Some(nonce_seq);
         self
     }
 
@@ -751,19 +728,15 @@ impl TransactionRequest {
 
     fn validate_8141_fields(&self, allow_placeholders: bool) -> Result<FrameFields, &'static str> {
         let sender = self.from.ok_or("sender")?;
-        let nonce_keys = self.nonce_keys.as_deref().ok_or("nonce_keys")?;
-        let nonce_seq = self.nonce_seq.ok_or("nonce_seq")?;
-        if self.nonce.is_some_and(|nonce| nonce != nonce_seq) {
-            return Err("nonce does not match nonce_seq");
-        }
-        let frames: Vec<Frame> = self
+        self.nonce.ok_or("nonce")?;
+        let frames = self
             .frames
             .as_deref()
             .ok_or("frames")?
             .iter()
             .cloned()
             .map(Frame::try_from)
-            .collect::<Result<_, _>>()?;
+            .collect::<Result<Vec<_>, _>>()?;
         let signatures = self.signatures.as_deref().ok_or("signatures")?;
         let fees = self.resolved_frame_fees()?;
         let hashes: alloc::borrow::Cow<'_, [B256]> = match &self.sidecar {
@@ -782,9 +755,9 @@ impl TransactionRequest {
             ),
         };
         let transaction = alloy_consensus::transaction::eip8141::TxEip8141Ref {
-            nonce_keys,
-            nonce_seq,
             sender,
+            nonce: self.nonce.unwrap_or_default(),
+            nonce_keys: self.nonce_keys.as_deref(),
             frames: &frames,
             signatures,
             fees: &fees,
@@ -824,8 +797,8 @@ impl TransactionRequest {
     ) -> TxEip8141 {
         TxEip8141 {
             chain_id: self.chain_id.unwrap_or(1),
-            nonce_keys: self.nonce_keys.unwrap_or_default(),
-            nonce_seq: self.nonce_seq.unwrap_or_default(),
+            nonce: self.nonce.unwrap_or_default(),
+            nonce_keys: self.nonce_keys,
             sender: self.from.unwrap_or_default(),
             frames,
             signatures: self.signatures.unwrap_or_default(),
@@ -897,8 +870,6 @@ impl TransactionRequest {
         let preferred_type = self.preferred_type();
         if preferred_type != TxType::Eip8141 {
             self.eip8141_fees = None;
-            self.nonce_keys = None;
-            self.nonce_seq = None;
         }
         match preferred_type {
             TxType::Legacy => {
@@ -1026,11 +997,7 @@ impl TransactionRequest {
     /// assert_eq!(request.minimal_tx_type(), TxType::Eip4844);
     /// ```
     pub const fn minimal_tx_type(&self) -> TxType {
-        if self.frames.is_some()
-            || self.signatures.is_some()
-            || self.nonce_keys.is_some()
-            || self.nonce_seq.is_some()
-        {
+        if self.frames.is_some() || self.signatures.is_some() || self.nonce_keys.is_some() {
             TxType::Eip8141
         } else if self.authorization_list.is_some() {
             TxType::Eip7702
@@ -1127,11 +1094,7 @@ impl TransactionRequest {
             return TxType::Eip8141;
         }
 
-        if self.frames.is_some()
-            || self.signatures.is_some()
-            || self.nonce_keys.is_some()
-            || self.nonce_seq.is_some()
-        {
+        if self.frames.is_some() || self.signatures.is_some() || self.nonce_keys.is_some() {
             TxType::Eip8141
         } else if self.authorization_list.is_some() {
             TxType::Eip7702
@@ -1580,8 +1543,8 @@ impl From<TxEip8141> for TransactionRequest {
         let ty = tx.ty();
         let TxEip8141 {
             chain_id,
+            nonce,
             nonce_keys,
-            nonce_seq,
             sender,
             frames,
             signatures,
@@ -1594,9 +1557,8 @@ impl From<TxEip8141> for TransactionRequest {
             max_fee_per_gas: fees.max_fee_per_gas.try_into().ok(),
             max_priority_fee_per_gas: fees.max_priority_fee_per_gas.try_into().ok(),
             max_fee_per_blob_gas: fees.max_fee_per_blob_gas.try_into().ok(),
-            nonce: Some(nonce_seq),
-            nonce_keys: Some(nonce_keys),
-            nonce_seq: Some(nonce_seq),
+            nonce: Some(nonce),
+            nonce_keys,
             chain_id: Some(chain_id),
             blob_versioned_hashes: Some(blob_versioned_hashes),
             transaction_type: Some(ty),
@@ -1784,6 +1746,8 @@ pub(super) mod serde_bincode_compat {
         pub data: Option<Cow<'a, Bytes>>,
         /// The nonce of the transaction.
         pub nonce: Option<u64>,
+        /// EIP-8250 nonce domains.
+        pub nonce_keys: Option<Vec<U256>>,
         /// The chain ID for the transaction.
         pub chain_id: Option<ChainId>,
         /// An EIP-2930 access list, which lowers cost for accessing accounts and storages in the list. See [EIP-2930](https://eips.ethereum.org/EIPS/eip-2930) for more information.
@@ -1798,10 +1762,6 @@ pub(super) mod serde_bincode_compat {
         /// Authorization list for EIP-7702 transactions.
         pub authorization_list:
             Option<Vec<alloy_eips::eip7702::serde_bincode_compat::SignedAuthorization<'a>>>,
-        /// EIP-8250 nonce keys for frame transactions.
-        pub nonce_keys: Option<Cow<'a, Vec<U256>>>,
-        /// EIP-8250 nonce sequence for frame transactions.
-        pub nonce_seq: Option<u64>,
         /// Ordered frames for EIP-8141 frame transactions.
         pub frames: Option<Vec<FrameRequest>>,
         /// Signature entries for EIP-8141 frame transactions.
@@ -1864,6 +1824,7 @@ pub(super) mod serde_bincode_compat {
                 input: value.input.input.as_ref().map(Cow::Borrowed),
                 data: value.input.data.as_ref().map(Cow::Borrowed),
                 nonce: value.nonce,
+                nonce_keys: value.nonce_keys.clone(),
                 chain_id: value.chain_id,
                 access_list: value.access_list.as_ref().map(Cow::Borrowed),
                 transaction_type: value.transaction_type,
@@ -1873,12 +1834,7 @@ pub(super) mod serde_bincode_compat {
                     .authorization_list
                     .as_ref()
                     .map(|auths| auths.iter().map(Into::into).collect()),
-                nonce_keys: value.nonce_keys.as_ref().map(Cow::Borrowed),
-                nonce_seq: value.nonce_seq,
-                frames: value
-                    .frames
-                    .as_ref()
-                    .map(|frames| frames.iter().map(FrameRequest::from).collect()),
+                frames: value.frames.as_ref().map(|frames| frames.iter().map(Into::into).collect()),
                 signatures: value.signatures.as_ref().map(Cow::Borrowed),
                 eip8141_fees: value.eip8141_fees,
             }
@@ -1901,6 +1857,7 @@ pub(super) mod serde_bincode_compat {
                     data: value.data.map(Cow::into_owned),
                 },
                 nonce: value.nonce,
+                nonce_keys: value.nonce_keys.clone(),
                 chain_id: value.chain_id,
                 access_list: value.access_list.map(|list| list.into_owned()),
                 transaction_type: value.transaction_type,
@@ -1911,11 +1868,7 @@ pub(super) mod serde_bincode_compat {
                 authorization_list: value
                     .authorization_list
                     .map(|list| list.into_iter().map(Into::into).collect()),
-                nonce_keys: value.nonce_keys.map(Cow::into_owned),
-                nonce_seq: value.nonce_seq,
-                frames: value
-                    .frames
-                    .map(|frames| frames.into_iter().map(crate::FrameRequest::from).collect()),
+                frames: value.frames.map(|frames| frames.into_iter().map(Into::into).collect()),
                 signatures: value.signatures.map(Cow::into_owned),
                 eip8141_fees: value.eip8141_fees,
             }
@@ -1956,7 +1909,7 @@ pub(super) mod serde_bincode_compat {
         use super::super::serde_bincode_compat;
 
         #[test]
-        fn frame_full_width_fees_bincode_roundtrip() {
+        fn frame_full_width_fees_and_nonce_keys_bincode_roundtrip() {
             #[serde_as]
             #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
             struct Data {
@@ -1964,6 +1917,8 @@ pub(super) mod serde_bincode_compat {
                 transaction: TransactionRequest,
             }
             let tx = alloy_consensus::TxEip8141 {
+                nonce_keys: Some(vec![U256::from(1), U256::MAX]),
+                nonce: 128,
                 frames: vec![Default::default()],
                 fees: alloy_eips::eip8141::TransactionFees {
                     max_fee_per_gas: U256::MAX,
