@@ -92,8 +92,10 @@ pub fn count_frame_data_tokens(data: &[u8]) -> u64 {
 pub struct TxEip8141 {
     /// EIP-155 replay protection chain ID.
     pub chain_id: ChainId,
-    /// Sender nonce.
+    /// Shared sequence number, or the legacy sender nonce before EIP-8250.
     pub nonce: u64,
+    /// EIP-8250 nonce domains. `None` retains the pre-fork wire encoding.
+    pub nonce_keys: Option<Vec<U256>>,
     /// Intended transaction sender.
     pub sender: Address,
     /// Ordered frames to execute.
@@ -148,6 +150,8 @@ impl serde::Serialize for TxEip8141 {
             chain_id: ChainId,
             #[serde(with = "alloy_serde::quantity")]
             nonce: u64,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            nonce_keys: Option<Vec<U256>>,
             #[serde(rename = "from")]
             sender: Address,
             frames: Vec<Frame<'a>>,
@@ -165,6 +169,7 @@ impl serde::Serialize for TxEip8141 {
             chain_id: ChainId,
             #[serde(with = "alloy_serde::quantity")]
             nonce: u64,
+            nonce_keys: Option<Vec<U256>>,
             sender: Address,
             frames: &'a [alloy_eips::eip8141::Frame],
             signatures: &'a [alloy_eips::eip8141::FrameSignature],
@@ -176,6 +181,7 @@ impl serde::Serialize for TxEip8141 {
             return Legacy {
                 chain_id: self.chain_id,
                 nonce: self.nonce,
+                nonce_keys: self.nonce_keys.clone(),
                 sender: self.sender,
                 frames: &self.frames,
                 signatures: &self.signatures,
@@ -214,6 +220,7 @@ impl serde::Serialize for TxEip8141 {
         Transaction {
             chain_id: self.chain_id,
             nonce: self.nonce,
+            nonce_keys: self.nonce_keys.clone(),
             sender: self.sender,
             frames,
             signatures,
@@ -239,6 +246,8 @@ impl<'de> serde::Deserialize<'de> for TxEip8141 {
             chain_id: ChainId,
             #[serde(with = "alloy_serde::quantity")]
             nonce: u64,
+            #[serde(default)]
+            nonce_keys: Option<Vec<U256>>,
             sender: Address,
             frames: Vec<Frame>,
             signatures: Vec<FrameSignature>,
@@ -311,6 +320,7 @@ impl<'de> serde::Deserialize<'de> for TxEip8141 {
             return Transaction::deserialize(deserializer).map(|tx| Self {
                 chain_id: tx.chain_id,
                 nonce: tx.nonce,
+                nonce_keys: tx.nonce_keys,
                 sender: tx.sender,
                 frames: tx.frames,
                 signatures: tx.signatures,
@@ -325,6 +335,7 @@ impl<'de> serde::Deserialize<'de> for TxEip8141 {
         Ok(Self {
             chain_id: tx.chain_id,
             nonce: tx.nonce,
+            nonce_keys: tx.nonce_keys,
             sender: tx.sender,
             frames: tx.frames,
             signatures: tx.signatures,
@@ -1007,6 +1018,8 @@ impl TxEip8141 {
     pub fn as_frame_ref(&self) -> TxEip8141Ref<'_> {
         TxEip8141Ref {
             sender: self.sender,
+            nonce: self.nonce,
+            nonce_keys: self.nonce_keys.as_deref(),
             frames: &self.frames,
             signatures: &self.signatures,
             fees: &self.fees,
@@ -1023,6 +1036,7 @@ impl TxEip8141 {
     #[doc(hidden)]
     pub fn rlp_encoded_fields_length(&self) -> usize {
         self.chain_id.length()
+            + self.nonce_keys.as_ref().map_or(0, Encodable::length)
             + self.nonce.length()
             + self.sender.length()
             + self.frames.length()
@@ -1034,6 +1048,9 @@ impl TxEip8141 {
     /// Encodes only the transaction fields into the desired buffer, without an RLP header.
     pub fn rlp_encode_fields(&self, out: &mut dyn BufMut) {
         self.chain_id.encode(out);
+        if let Some(keys) = &self.nonce_keys {
+            keys.encode(out);
+        }
         self.nonce.encode(out);
         self.sender.encode(out);
         self.frames.encode(out);
@@ -1044,8 +1061,17 @@ impl TxEip8141 {
 
     /// Decodes the fields of the transaction from RLP bytes.
     pub fn rlp_decode_fields(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        let chain_id = Decodable::decode(buf)?;
+        let nonce_keys = if buf.first().is_some_and(|byte| *byte >= 0xc0) {
+            let keys = Vec::<U256>::decode(buf)?;
+            alloy_eips::eip8141::validate_nonce_keys(&keys).map_err(alloy_rlp::Error::Custom)?;
+            Some(keys)
+        } else {
+            None
+        };
         Ok(Self {
-            chain_id: Decodable::decode(buf)?,
+            chain_id,
+            nonce_keys,
             nonce: Decodable::decode(buf)?,
             sender: Decodable::decode(buf)?,
             frames: Decodable::decode(buf)?,
@@ -1089,6 +1115,7 @@ impl TxEip8141 {
         out.put_u8(Self::tx_type());
         let signatures = SigningFrameSignatures(&self.signatures);
         let payload_length = self.chain_id.length()
+            + self.nonce_keys.as_ref().map_or(0, Encodable::length)
             + self.nonce.length()
             + self.sender.length()
             + self.frames.length()
@@ -1097,6 +1124,9 @@ impl TxEip8141 {
             + self.blob_versioned_hashes.length();
         Header { list: true, payload_length }.encode(out);
         self.chain_id.encode(out);
+        if let Some(keys) = &self.nonce_keys {
+            keys.encode(out);
+        }
         self.nonce.encode(out);
         self.sender.encode(out);
         self.frames.encode(out);
@@ -1109,6 +1139,7 @@ impl TxEip8141 {
     pub fn payload_len_for_signature(&self) -> usize {
         let signatures = SigningFrameSignatures(&self.signatures);
         let payload_length = self.chain_id.length()
+            + self.nonce_keys.as_ref().map_or(0, Encodable::length)
             + self.nonce.length()
             + self.sender.length()
             + self.frames.length()
@@ -1213,6 +1244,7 @@ impl TxEip8141 {
     #[inline]
     pub fn size(&self) -> usize {
         size_of::<Self>()
+            + self.nonce_keys.as_ref().map_or(0, |keys| keys.capacity() * size_of::<U256>())
             + self.frames.capacity() * size_of::<Frame>()
             + self.signatures.capacity() * size_of::<FrameSignature>()
             + self.blob_versioned_hashes.capacity() * size_of::<B256>()
@@ -1226,6 +1258,10 @@ impl TxEip8141 {
 pub struct TxEip8141Ref<'a> {
     /// Transaction sender.
     pub sender: Address,
+    /// Shared nonce sequence.
+    pub nonce: u64,
+    /// EIP-8250 nonce domains, absent before activation.
+    pub nonce_keys: Option<&'a [U256]>,
     /// Frame list.
     pub frames: &'a [Frame],
     /// Signature list.
@@ -1252,6 +1288,9 @@ impl TxEip8141Ref<'_> {
     }
 
     fn validate_inner(&self, allow_placeholders: bool) -> Result<(), &'static str> {
+        if let Some(keys) = self.nonce_keys {
+            alloy_eips::eip8141::validate_nonce_keys(keys)?;
+        }
         if self.frames.is_empty() || self.frames.len() > MAX_FRAMES {
             return Err("EIP-8141 transaction must contain between 1 and 64 frames");
         }
@@ -1401,7 +1440,10 @@ impl TxEip8141Ref<'_> {
             .frames
             .iter()
             .fold(0u64, |acc, frame| acc.saturating_add(count_frame_data_tokens(&frame.data)));
-        self.signatures.iter().fold(frame_tokens, |acc, signature| {
+        let nonce_tokens = self.nonce_keys.map_or(0, |keys| {
+            count_frame_data_tokens(&alloy_eips::eip8141::nonce_calldata(keys, self.nonce))
+        });
+        self.signatures.iter().fold(frame_tokens.saturating_add(nonce_tokens), |acc, signature| {
             acc.saturating_add(count_frame_data_tokens(signature.signer.as_bytes()))
                 .saturating_add(count_frame_data_tokens(signature.msg.as_bytes()))
                 .saturating_add(count_frame_data_tokens(&signature.signature))
@@ -1412,7 +1454,10 @@ impl TxEip8141Ref<'_> {
     pub fn frame_calldata_len(&self) -> u64 {
         let frame_data_len =
             self.frames.iter().fold(0u64, |acc, frame| acc.saturating_add(frame.data.len() as u64));
-        self.signatures.iter().fold(frame_data_len, |acc, signature| {
+        let nonce_len = self
+            .nonce_keys
+            .map_or(0, |keys| alloy_eips::eip8141::nonce_calldata(keys, self.nonce).len() as u64);
+        self.signatures.iter().fold(frame_data_len.saturating_add(nonce_len), |acc, signature| {
             acc.saturating_add(signature.signer.as_bytes().len() as u64)
                 .saturating_add(signature.msg.as_bytes().len() as u64)
                 .saturating_add(signature.signature.len() as u64)
@@ -1648,9 +1693,9 @@ impl Decodable for TxEip8141 {
 /// Bincode-compatible [`TxEip8141`] serde implementation.
 #[cfg(all(feature = "serde", feature = "serde-bincode-compat"))]
 pub(super) mod serde_bincode_compat {
-    use alloc::borrow::Cow;
+    use alloc::{borrow::Cow, vec::Vec};
     use alloy_eips::eip8141::{Frame, FrameSignature, TransactionFees};
-    use alloy_primitives::{Address, ChainId, B256};
+    use alloy_primitives::{Address, ChainId, B256, U256};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use serde_with::{DeserializeAs, SerializeAs};
 
@@ -1673,6 +1718,7 @@ pub(super) mod serde_bincode_compat {
     pub struct TxEip8141<'a> {
         chain_id: ChainId,
         nonce: u64,
+        nonce_keys: Option<Vec<U256>>,
         sender: Address,
         frames: Cow<'a, [Frame]>,
         signatures: Cow<'a, [FrameSignature]>,
@@ -1685,6 +1731,7 @@ pub(super) mod serde_bincode_compat {
             Self {
                 chain_id: value.chain_id,
                 nonce: value.nonce,
+                nonce_keys: value.nonce_keys.clone(),
                 sender: value.sender,
                 frames: Cow::Borrowed(value.frames.as_slice()),
                 signatures: Cow::Borrowed(value.signatures.as_slice()),
@@ -1699,6 +1746,7 @@ pub(super) mod serde_bincode_compat {
             Self {
                 chain_id: value.chain_id,
                 nonce: value.nonce,
+                nonce_keys: value.nonce_keys,
                 sender: value.sender,
                 frames: value.frames.into_owned(),
                 signatures: value.signatures.into_owned(),
@@ -1773,6 +1821,44 @@ mod tests {
 
     fn valid_tx() -> TxEip8141 {
         TxEip8141 { frames: vec![Frame::default()], ..Default::default() }
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn keyed_nonce_encoding_and_rpc_roundtrip() {
+        use alloy_eips::eip8141::Frame;
+        let legacy =
+            TxEip8141 { chain_id: 1, frames: vec![Frame::default()], ..Default::default() };
+        let mut keyed = legacy.clone();
+        keyed.nonce_keys = Some(vec![U256::from(1), U256::MAX]);
+        keyed.nonce = 128;
+        let encoded = alloy_rlp::encode(&keyed);
+        assert_eq!(TxEip8141::decode(&mut encoded.as_slice()).unwrap(), keyed);
+        let json = serde_json::to_value(&keyed).unwrap();
+        assert_eq!(json["nonce"], "0x80");
+        assert_eq!(json["nonceKeys"][0], "0x1");
+        assert!(json.get("nonceSeq").is_none());
+        assert_eq!(serde_json::from_value::<TxEip8141>(json).unwrap(), keyed);
+        keyed.nonce = 0;
+        keyed.nonce_keys = Some(vec![U256::ZERO]);
+        assert_ne!(keyed.signature_hash(), legacy.signature_hash());
+        assert_eq!(keyed.frame_calldata_tokens(), legacy.frame_calldata_tokens() + 12);
+        assert_eq!(keyed.frame_calldata_len(), legacy.frame_calldata_len() + 3);
+    }
+
+    #[test]
+    fn keyed_nonce_decoder_rejects_noncanonical_sets() {
+        for keys in [
+            vec![],
+            vec![U256::ZERO, U256::from(1)],
+            vec![U256::from(2), U256::from(1)],
+            vec![U256::from(1); 2],
+            (1..=17).map(U256::from).collect(),
+        ] {
+            let tx = TxEip8141 { nonce_keys: Some(keys), ..Default::default() };
+            let encoded = alloy_rlp::encode(&tx);
+            assert!(TxEip8141::decode(&mut encoded.as_slice()).is_err());
+        }
     }
 
     #[test]
@@ -1861,6 +1947,7 @@ mod tests {
         let tx = TxEip8141 {
             chain_id: 1,
             nonce: 7,
+            nonce_keys: None,
             sender: Address::from([0x11; 20]),
             frames: vec![Frame {
                 mode: FrameMode::Verify,
@@ -1898,6 +1985,7 @@ mod tests {
         let tx = TxEip8141 {
             chain_id: 1,
             nonce: 2,
+            nonce_keys: None,
             sender: Address::repeat_byte(0x11),
             frames: vec![Frame {
                 mode: FrameMode::Verify,
@@ -1944,6 +2032,7 @@ mod tests {
         let mut tx = TxEip8141 {
             chain_id: 1,
             nonce: 0,
+            nonce_keys: None,
             sender: Address::from([0x11; 20]),
             frames: Vec::new(),
             signatures: vec![FrameSignature {
