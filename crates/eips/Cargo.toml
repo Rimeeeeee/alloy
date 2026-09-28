@@ -27,8 +27,9 @@ workspace = true
 alloy-eip2124.workspace = true
 alloy-eip2930.workspace = true
 alloy-eip7702.workspace = true
-alloy-eip8141.workspace = true
+alloy-eip7906.workspace = true
 alloy-eip7928 = { workspace = true, features = ["rlp"] }
+alloy-eip8141.workspace = true
 
 alloy-primitives = { workspace = true, features = ["rlp"] }
 alloy-rlp = { workspace = true, features = ["derive"] }
@@ -86,8 +87,9 @@ std = [
 	"alloy-eip2124/std",
 	"alloy-eip2930/std",
 	"alloy-eip7702/std",
-	"alloy-eip8141/std",
+	"alloy-eip7906/std",
 	"alloy-eip7928/std",
+	"alloy-eip8141/std",
 	"derive_more/std",
 	"sha2?/std",
 	"either/std",
