@@ -84,6 +84,23 @@ pub fn count_frame_data_tokens(data: &[u8]) -> u64 {
     data.iter().fold(0u64, |acc, byte| acc.saturating_add(if *byte == 0 { 1 } else { 4 }))
 }
 
+#[cfg(any(test, feature = "arbitrary"))]
+fn arbitrary_nonce_keys(
+    u: &mut arbitrary::Unstructured<'_>,
+) -> arbitrary::Result<Option<Vec<U256>>> {
+    if !u.arbitrary::<bool>()? {
+        return Ok(None);
+    }
+    let count = u.int_in_range(1..=alloy_eips::eip8141::MAX_NONCE_KEYS)?;
+    let mut keys = (0..count).map(|_| u.arbitrary()).collect::<arbitrary::Result<Vec<U256>>>()?;
+    keys.sort_unstable();
+    keys.dedup();
+    if keys.len() > 1 && keys[0].is_zero() {
+        keys.remove(0);
+    }
+    Ok(Some(keys))
+}
+
 /// An EIP-8141 frame transaction.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(any(test, feature = "arbitrary"), derive(arbitrary::Arbitrary))]
@@ -95,6 +112,7 @@ pub struct TxEip8141 {
     /// Shared sequence number, or the legacy sender nonce before EIP-8250.
     pub nonce: u64,
     /// EIP-8250 nonce domains. `None` retains the pre-fork wire encoding.
+    #[cfg_attr(any(test, feature = "arbitrary"), arbitrary(with = arbitrary_nonce_keys))]
     pub nonce_keys: Option<Vec<U256>>,
     /// Intended transaction sender.
     pub sender: Address,
