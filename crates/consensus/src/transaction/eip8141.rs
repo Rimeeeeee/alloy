@@ -11,8 +11,8 @@ use alloy_eips::{
             FRAME_TX_DATA_TOKEN_STANDARD_COST, FRAME_TX_INTRINSIC_COST, FRAME_TX_PER_FRAME_COST,
             FRAME_TX_TOTAL_COST_FLOOR_PER_TOKEN, FRAME_TX_TYPE, MAX_FRAMES, TX_VALUE_COST,
         },
-        ApprovalScope, Eip8141Error, Frame, FrameMode, FrameSignature, SignatureMessage,
-        TransactionFees,
+        has_valid_post_tx_suffix, ApprovalScope, Eip8141Error, Frame, FrameMode, FrameSignature,
+        SignatureMessage, TransactionFees,
     },
     Decodable2718, Encodable2718, Typed2718,
 };
@@ -1255,6 +1255,9 @@ impl TxEip8141Ref<'_> {
         if self.frames.is_empty() || self.frames.len() > MAX_FRAMES {
             return Err("EIP-8141 transaction must contain between 1 and 64 frames");
         }
+        if !has_valid_post_tx_suffix(self.frames) {
+            return Err("EIP-7906 POST_TX frames must form a trailing suffix");
+        }
         if self.fees.max_priority_fee_per_gas > self.fees.max_fee_per_gas {
             return Err("max priority fee exceeds max fee");
         }
@@ -1297,6 +1300,9 @@ impl TxEip8141Ref<'_> {
         for (index, frame) in self.frames.iter().enumerate() {
             if frame.has_reserved_flags() {
                 return Err("reserved EIP-8141 frame flag is set");
+            }
+            if frame.is_post_tx() && frame.is_atomic_batch() {
+                return Err("EIP-7906 atomic flag is invalid on POST_TX frames");
             }
             if !frame.value.is_zero() && frame.mode != FrameMode::Sender {
                 return Err("frame value is only valid in sender mode");
@@ -1829,6 +1835,20 @@ mod tests {
         tx.frames[1].flags = 0;
         tx.frames[1].mode = FrameMode::Verify;
         assert!(tx.validate().is_err());
+    }
+
+    #[test]
+    fn validates_post_tx_suffix_constraints() {
+        let post_tx = Frame { mode: FrameMode::PostTx, ..Default::default() };
+        let mut tx = valid_tx();
+        tx.frames.push(post_tx.clone());
+        assert!(tx.validate().is_ok());
+
+        tx.frames.push(Frame::default());
+        assert_eq!(tx.validate(), Err("EIP-7906 POST_TX frames must form a trailing suffix"));
+
+        tx.frames = vec![Frame::default(), Frame { flags: ATOMIC_BATCH_FLAG, ..post_tx }];
+        assert_eq!(tx.validate(), Err("EIP-7906 atomic flag is invalid on POST_TX frames"));
     }
 
     #[test]
