@@ -103,6 +103,7 @@ mod tests {
     fn unsigned_frame_fill_preserves_placeholders_without_weakening_signed_validation() {
         let request: TransactionRequest = serde_json::from_value(json!({
             "type": "0x6", "from": Address::repeat_byte(0x11), "chainId": "0x1", "nonce": "0x0",
+            "nonceKeys": ["0x0"], "nonceSeq": "0x0",
             "frames": [{"mode":"0x1", "executionGas":"0x123", "stateGas":"0x45"}],
             "signatures": [{"scheme":"0x1"}],
             "maxFeePerGas": "0x1", "maxPriorityFeePerGas": "0x0", "maxFeePerBlobGas": "0x0",
@@ -110,6 +111,9 @@ mod tests {
         }))
         .unwrap();
         assert!(request.clone().build_8141().is_err());
+        let mut incomplete = request.clone();
+        incomplete.frames.as_mut().unwrap()[0].execution_gas = None;
+        assert_eq!(incomplete.complete_8141(), Err(vec!["missing frame executionGas"]));
         let transaction = request.build_typed_simulate_transaction().unwrap();
         let value = serde_json::to_value(&transaction).unwrap();
         assert_eq!(value["signatures"][0]["scheme"], "0x1");

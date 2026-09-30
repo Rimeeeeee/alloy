@@ -105,6 +105,9 @@ pub struct TransactionRequest {
         )
     )]
     pub nonce: Option<u64>,
+    /// EIP-8250 nonce domains sharing the `nonce` sequence.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub nonce_keys: Option<Vec<U256>>,
     /// The chain ID for the transaction.
     #[cfg_attr(
         feature = "serde",
@@ -227,6 +230,7 @@ impl TransactionRequest {
             transaction_type: Some(tx_type),
             sidecar: None,
             authorization_list,
+            nonce_keys: None,
             frames: None,
             signatures: None,
             eip8141_fees: None,
@@ -752,6 +756,8 @@ impl TransactionRequest {
         };
         let transaction = alloy_consensus::transaction::eip8141::TxEip8141Ref {
             sender,
+            nonce: self.nonce.unwrap_or_default(),
+            nonce_keys: self.nonce_keys.as_deref(),
             frames: &frames,
             signatures,
             fees: &fees,
@@ -792,6 +798,7 @@ impl TransactionRequest {
         TxEip8141 {
             chain_id: self.chain_id.unwrap_or(1),
             nonce: self.nonce.unwrap_or_default(),
+            nonce_keys: self.nonce_keys,
             sender: self.from.unwrap_or_default(),
             frames,
             signatures: self.signatures.unwrap_or_default(),
@@ -990,7 +997,7 @@ impl TransactionRequest {
     /// assert_eq!(request.minimal_tx_type(), TxType::Eip4844);
     /// ```
     pub const fn minimal_tx_type(&self) -> TxType {
-        if self.frames.is_some() || self.signatures.is_some() {
+        if self.frames.is_some() || self.signatures.is_some() || self.nonce_keys.is_some() {
             TxType::Eip8141
         } else if self.authorization_list.is_some() {
             TxType::Eip7702
@@ -1087,7 +1094,7 @@ impl TransactionRequest {
             return TxType::Eip8141;
         }
 
-        if self.frames.is_some() || self.signatures.is_some() {
+        if self.frames.is_some() || self.signatures.is_some() || self.nonce_keys.is_some() {
             TxType::Eip8141
         } else if self.authorization_list.is_some() {
             TxType::Eip7702
@@ -1537,6 +1544,7 @@ impl From<TxEip8141> for TransactionRequest {
         let TxEip8141 {
             chain_id,
             nonce,
+            nonce_keys,
             sender,
             frames,
             signatures,
@@ -1550,6 +1558,7 @@ impl From<TxEip8141> for TransactionRequest {
             max_priority_fee_per_gas: fees.max_priority_fee_per_gas.try_into().ok(),
             max_fee_per_blob_gas: fees.max_fee_per_blob_gas.try_into().ok(),
             nonce: Some(nonce),
+            nonce_keys,
             chain_id: Some(chain_id),
             blob_versioned_hashes: Some(blob_versioned_hashes),
             transaction_type: Some(ty),
@@ -1737,6 +1746,8 @@ pub(super) mod serde_bincode_compat {
         pub data: Option<Cow<'a, Bytes>>,
         /// The nonce of the transaction.
         pub nonce: Option<u64>,
+        /// EIP-8250 nonce domains.
+        pub nonce_keys: Option<Vec<U256>>,
         /// The chain ID for the transaction.
         pub chain_id: Option<ChainId>,
         /// An EIP-2930 access list, which lowers cost for accessing accounts and storages in the list. See [EIP-2930](https://eips.ethereum.org/EIPS/eip-2930) for more information.
@@ -1813,6 +1824,7 @@ pub(super) mod serde_bincode_compat {
                 input: value.input.input.as_ref().map(Cow::Borrowed),
                 data: value.input.data.as_ref().map(Cow::Borrowed),
                 nonce: value.nonce,
+                nonce_keys: value.nonce_keys.clone(),
                 chain_id: value.chain_id,
                 access_list: value.access_list.as_ref().map(Cow::Borrowed),
                 transaction_type: value.transaction_type,
@@ -1845,6 +1857,7 @@ pub(super) mod serde_bincode_compat {
                     data: value.data.map(Cow::into_owned),
                 },
                 nonce: value.nonce,
+                nonce_keys: value.nonce_keys.clone(),
                 chain_id: value.chain_id,
                 access_list: value.access_list.map(|list| list.into_owned()),
                 transaction_type: value.transaction_type,
@@ -1896,7 +1909,7 @@ pub(super) mod serde_bincode_compat {
         use super::super::serde_bincode_compat;
 
         #[test]
-        fn frame_full_width_fees_bincode_roundtrip() {
+        fn frame_full_width_fees_and_nonce_keys_bincode_roundtrip() {
             #[serde_as]
             #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
             struct Data {
@@ -1904,6 +1917,8 @@ pub(super) mod serde_bincode_compat {
                 transaction: TransactionRequest,
             }
             let tx = alloy_consensus::TxEip8141 {
+                nonce_keys: Some(vec![U256::from(1), U256::MAX]),
+                nonce: 128,
                 frames: vec![Default::default()],
                 fees: alloy_eips::eip8141::TransactionFees {
                     max_fee_per_gas: U256::MAX,

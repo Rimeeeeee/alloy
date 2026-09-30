@@ -241,6 +241,7 @@ mod tests {
         let request = TransactionRequest {
             from: Some(Address::ZERO),
             nonce: Some(0),
+            nonce_keys: Some(vec![U256::ZERO]),
             max_priority_fee_per_gas: Some(1),
             max_fee_per_gas: Some(2),
             max_fee_per_blob_gas: Some(0),
