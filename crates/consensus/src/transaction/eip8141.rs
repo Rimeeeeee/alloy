@@ -1295,6 +1295,9 @@ impl TxEip8141Ref<'_> {
         let mut state_gas = 0u64;
         let mut expiry_verifiers = 0u8;
         for (index, frame) in self.frames.iter().enumerate() {
+            if frame.mode.is_post_tx() {
+                return Err("POST_TX frames require EIP-7906");
+            }
             if frame.has_reserved_flags() {
                 return Err("reserved EIP-8141 frame flag is set");
             }

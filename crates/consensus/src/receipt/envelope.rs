@@ -1,6 +1,7 @@
 use crate::{
-    Eip2718DecodableReceipt, Eip2718EncodableReceipt, Eip658Value, InMemorySize, Receipt,
-    ReceiptWithBloom, RlpDecodableReceipt, RlpEncodableReceipt, TxReceipt, TxType,
+    Eip2718DecodableReceipt, Eip2718EncodableReceipt, Eip658Value, FrameReceiptEnvelope,
+    InMemorySize, Receipt, ReceiptWithBloom, RlpDecodableReceipt, RlpEncodableReceipt, TxReceipt,
+    TxType,
 };
 use alloc::vec::Vec;
 use alloy_eips::{
@@ -61,134 +62,6 @@ pub enum ReceiptEnvelope<T = Log> {
     /// [EIP-8141]: https://eips.ethereum.org/EIPS/eip-8141
     #[cfg_attr(feature = "serde", serde(rename = "0x6", alias = "0x06"))]
     Eip8141(FrameReceiptEnvelope<T>),
-}
-
-/// An EIP-8141 receipt payload together with the transaction logs flattened across frames.
-///
-/// The payload is the consensus representation. The flattened log cache is kept separately so
-/// that [`TxReceipt::logs`] can return a slice without allocating on every access.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "borsh", derive(borsh::BorshSerialize, borsh::BorshDeserialize))]
-pub struct FrameReceiptEnvelope<T> {
-    /// The consensus EIP-8141 receipt payload.
-    payload: FrameReceiptPayload<T>,
-    /// Logs in frame execution order.
-    logs: Vec<T>,
-}
-
-impl<T: Clone> From<FrameReceiptPayload<T>> for FrameReceiptEnvelope<T> {
-    fn from(payload: FrameReceiptPayload<T>) -> Self {
-        let logs = payload
-            .frame_receipts
-            .iter()
-            .flat_map(|receipt| receipt.logs.iter().cloned())
-            .collect();
-        Self { payload, logs }
-    }
-}
-
-impl<T> FrameReceiptEnvelope<T> {
-    /// Creates a frame receipt envelope from its consensus payload.
-    pub fn new(payload: FrameReceiptPayload<T>) -> Self
-    where
-        T: Clone,
-    {
-        payload.into()
-    }
-
-    /// Returns the consensus EIP-8141 receipt payload.
-    pub const fn payload(&self) -> &FrameReceiptPayload<T> {
-        &self.payload
-    }
-
-    /// Returns the flattened logs in frame execution order.
-    pub fn logs(&self) -> &[T] {
-        &self.logs
-    }
-
-    /// Splits this envelope into its consensus payload and derived flattened logs.
-    pub fn into_parts(self) -> (FrameReceiptPayload<T>, Vec<T>) {
-        (self.payload, self.logs)
-    }
-}
-
-impl<T: Encodable> Encodable for FrameReceiptEnvelope<T> {
-    fn encode(&self, out: &mut dyn BufMut) {
-        self.payload.encode(out);
-    }
-
-    fn length(&self) -> usize {
-        self.payload.length()
-    }
-}
-
-impl<T: Decodable + Clone> Decodable for FrameReceiptEnvelope<T> {
-    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        FrameReceiptPayload::<T>::decode(buf).map(Into::into)
-    }
-}
-
-#[cfg(feature = "serde")]
-impl<T> serde::Serialize for FrameReceiptEnvelope<T>
-where
-    T: serde::Serialize + AsRef<Log>,
-{
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        #[derive(serde::Serialize)]
-        #[serde(rename_all = "camelCase")]
-        struct FrameReceipt<'a, T> {
-            #[serde(with = "alloy_serde::quantity")]
-            status: u8,
-            #[serde(with = "alloy_serde::quantity")]
-            gas_used: u64,
-            #[serde(with = "alloy_serde::quantity")]
-            execution_gas_used: u64,
-            #[serde(with = "alloy_serde::quantity")]
-            state_gas_used: u64,
-            logs: &'a [T],
-        }
-
-        #[derive(serde::Serialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Frame<'a, T> {
-            #[serde(with = "alloy_serde::quantity")]
-            status: u8,
-            #[serde(with = "alloy_serde::quantity")]
-            cumulative_gas_used: u64,
-            logs: &'a [T],
-            logs_bloom: Bloom,
-            payer: alloy_primitives::Address,
-            frame_receipts: Vec<FrameReceipt<'a, T>>,
-        }
-
-        let frame_receipts = self
-            .payload
-            .frame_receipts
-            .iter()
-            .map(|receipt| FrameReceipt {
-                status: receipt.status.into(),
-                gas_used: receipt.gas_used.execution.saturating_add(receipt.gas_used.state),
-                execution_gas_used: receipt.gas_used.execution,
-                state_gas_used: receipt.gas_used.state,
-                logs: &receipt.logs,
-            })
-            .collect();
-
-        Frame {
-            status: u8::from(
-                self.payload
-                    .frame_receipts
-                    .iter()
-                    .all(|frame| matches!(frame.status, FrameStatus::Success)),
-            ),
-            cumulative_gas_used: self.payload.cumulative_gas_used,
-            logs: &self.logs,
-            logs_bloom: logs_bloom(self.logs.iter().map(AsRef::as_ref)),
-            payer: self.payload.payer,
-            frame_receipts,
-        }
-        .serialize(serializer)
-    }
 }
 
 /// Deserializes a receipt, treating a missing `type` field as [`TxType::Legacy`].
@@ -914,37 +787,6 @@ mod test {
 
     #[cfg(feature = "serde")]
     #[test]
-    fn deser_pre658_receipt_envelope() {
-        use crate::Receipt;
-        use alloy_primitives::b256;
-
-        let receipt = super::ReceiptWithBloom::<Receipt<()>> {
-            receipt: super::Receipt {
-                status: super::Eip658Value::PostState(b256!(
-                    "284d35bf53b82ef480ab4208527325477439c64fb90ef518450f05ee151c8e10"
-                )),
-                cumulative_gas_used: 0,
-                logs: Default::default(),
-            },
-            logs_bloom: Default::default(),
-        };
-
-        let json = serde_json::to_string(&receipt).unwrap();
-
-        println!("Serialized {json}");
-
-        let receipt: super::ReceiptWithBloom<Receipt<()>> = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(
-            receipt.receipt.status,
-            super::Eip658Value::PostState(b256!(
-                "284d35bf53b82ef480ab4208527325477439c64fb90ef518450f05ee151c8e10"
-            ))
-        );
-    }
-
-    #[cfg(feature = "serde")]
-    #[test]
     fn deser_receipt_envelope_without_type() {
         let inner = super::ReceiptWithBloom::<Receipt<()>> {
             receipt: Receipt {
@@ -1090,5 +932,36 @@ mod test {
         assert_eq!(calls, 2);
         assert_eq!(mapped.logs(), &[1, 2]);
         assert_eq!(mapped.payload().frame_receipts[0].logs, [1, 2]);
+    }
+
+    #[test]
+    fn tagged_legacy_receipt_envelope_is_rejected() {
+        use alloc::{vec, vec::Vec};
+        use alloy_eips::eip2718::{Decodable2718, Eip2718Error, Encodable2718};
+        use alloy_rlp::{Decodable, Header};
+
+        let envelope = ReceiptEnvelope::<Log>::Legacy(Default::default());
+        let encoded = envelope.encoded_2718();
+        assert!(encoded[0] >= 0xc0, "sanity: legacy receipts are encoded as a bare RLP list");
+        assert_eq!(ReceiptEnvelope::decode_2718_exact(&encoded).unwrap(), envelope);
+        assert_eq!(ReceiptEnvelope::network_decode(&mut encoded.as_slice()).unwrap(), envelope);
+        assert_eq!(ReceiptEnvelope::decode(&mut encoded.as_slice()).unwrap(), envelope);
+
+        // A literal `0x00` type byte is rejected in both the raw EIP-2718 and the network framing.
+        let mut tagged = vec![0x00];
+        tagged.extend_from_slice(&encoded);
+        let mut tagged_network = Vec::new();
+        Header { list: false, payload_length: tagged.len() }.encode(&mut tagged_network);
+        tagged_network.extend_from_slice(&tagged);
+
+        assert!(matches!(
+            ReceiptEnvelope::decode_2718_exact(&tagged),
+            Err(Eip2718Error::UnexpectedType(0))
+        ));
+        assert!(matches!(
+            ReceiptEnvelope::network_decode(&mut tagged_network.as_slice()),
+            Err(Eip2718Error::UnexpectedType(0))
+        ));
+        assert!(ReceiptEnvelope::decode(&mut tagged_network.as_slice()).is_err());
     }
 }
