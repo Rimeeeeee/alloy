@@ -826,7 +826,9 @@ where
         tx: N::TransactionRequest,
     ) -> TransportResult<N::TxEnvelope> {
         match self.fill(tx).await? {
-            SendableTx::Envelope(envelope) => Ok(envelope),
+            SendableTx::Envelope(envelope) | SendableTx::EnvelopeWithSidecar { envelope, .. } => {
+                Ok(envelope)
+            }
             SendableTx::Builder(tx) => {
                 if let FillerControlFlow::Missing(missing) = self.filler.status(&tx) {
                     let message = format!("missing properties: {missing:?}");
