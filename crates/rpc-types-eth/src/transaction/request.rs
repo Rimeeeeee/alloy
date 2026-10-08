@@ -817,17 +817,6 @@ impl TransactionRequest {
         Ok(TxEip8141WithSidecar::new(self.into_frame_transaction(fees, hashes, frames), sidecar))
     }
 
-    /// Ensures `to` field is set to an address which is required by:
-    /// - EIP 7702
-    /// - EIP 4844
-    const fn ensure_mandatory_to(&self) -> Result<(), ()> {
-        if !matches!(self.to, Some(TxKind::Call(_))) {
-            Err(())
-        } else {
-            Ok(())
-        }
-    }
-
     fn check_reqd_fields(&self) -> Vec<&'static str> {
         let mut missing = Vec::with_capacity(12);
         if self.nonce.is_none() {

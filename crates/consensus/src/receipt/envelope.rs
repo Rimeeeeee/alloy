@@ -61,7 +61,13 @@ pub enum ReceiptEnvelope<T = Log> {
     ///
     /// [EIP-8141]: https://eips.ethereum.org/EIPS/eip-8141
     #[cfg_attr(feature = "serde", serde(rename = "0x6", alias = "0x06"))]
-    Eip8141(FrameReceiptEnvelope<T>),
+    Eip8141(
+        #[cfg_attr(
+            feature = "borsh",
+            borsh(bound(deserialize = "T: borsh::BorshDeserialize + Clone"))
+        )]
+        FrameReceiptEnvelope<T>,
+    ),
 }
 
 /// Deserializes a receipt, treating a missing `type` field as [`TxType::Legacy`].

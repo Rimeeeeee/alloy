@@ -546,7 +546,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod tests {
+mod frame_conversion_tests {
     use super::*;
     use alloy_eips::eip8141::FrameReceiptPayload;
 

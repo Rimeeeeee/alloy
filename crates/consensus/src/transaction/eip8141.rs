@@ -2148,4 +2148,13 @@ mod tests {
             FRAME_TX_INTRINSIC_COST + FRAME_TX_PER_FRAME_COST + TX_VALUE_COST
         );
     }
+
+    #[test]
+    fn rejects_post_tx_frames_without_eip7906() {
+        let tx = TxEip8141 {
+            frames: vec![Frame { mode: FrameMode::PostTx, ..Default::default() }],
+            ..Default::default()
+        };
+        assert_eq!(tx.validate(), Err("POST_TX frames require EIP-7906"));
+    }
 }
