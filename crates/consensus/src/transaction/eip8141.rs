@@ -1087,7 +1087,7 @@ impl TxEip8141 {
         } else {
             None
         };
-        Ok(Self {
+        let tx = Self {
             chain_id,
             nonce_keys,
             nonce: Decodable::decode(buf)?,
@@ -1096,7 +1096,11 @@ impl TxEip8141 {
             signatures: Decodable::decode(buf)?,
             fees: Decodable::decode(buf)?,
             blob_versioned_hashes: Decodable::decode(buf)?,
-        })
+        };
+        // Reject malformed budgets before gas-limit derivation can saturate and trigger
+        // an unrelated block-capacity error.
+        validate_frame_gas_limits(&tx.frames).map_err(alloy_rlp::Error::Custom)?;
+        Ok(tx)
     }
 
     /// Creates the RLP list header for the transaction payload.
@@ -1351,8 +1355,6 @@ impl TxEip8141Ref<'_> {
             })?;
         }
 
-        let mut execution_gas = 0u64;
-        let mut state_gas = 0u64;
         let mut expiry_verifiers = 0u8;
         for (index, frame) in self.frames.iter().enumerate() {
             if frame.has_reserved_flags() {
@@ -1394,15 +1396,9 @@ impl TxEip8141Ref<'_> {
                     return Err("invalid expiry verifier frame");
                 }
             }
-            execution_gas = execution_gas
-                .checked_add(frame.limits.execution)
-                .ok_or("frame execution gas limit overflows u64")?;
-            state_gas = state_gas
-                .checked_add(frame.limits.state)
-                .ok_or("frame state gas limit overflows u64")?;
         }
 
-        let _ = execution_gas.checked_add(state_gas).ok_or("frame gas limit overflows u64")?;
+        validate_frame_gas_limits(self.frames)?;
         let _ = self
             .signature_verification_gas()
             .checked_add(self.value_transfer_gas())
@@ -1714,6 +1710,23 @@ impl Decodable for TxEip8141 {
     }
 }
 
+fn validate_frame_gas_limits(frames: &[Frame]) -> Result<(), &'static str> {
+    let mut execution_gas = 0u64;
+    let mut state_gas = 0u64;
+    for frame in frames {
+        execution_gas = execution_gas
+            .checked_add(frame.limits.execution)
+            .ok_or("invalid EIP-8141 frame format: total execution gas exceeds 64 bits")?;
+        state_gas = state_gas
+            .checked_add(frame.limits.state)
+            .ok_or("invalid EIP-8141 frame format: total state gas exceeds 64 bits")?;
+    }
+    execution_gas
+        .checked_add(state_gas)
+        .ok_or("invalid EIP-8141 frame format: combined execution and state gas exceeds 64 bits")?;
+    Ok(())
+}
+
 /// Bincode-compatible [`TxEip8141`] serde implementation.
 #[cfg(all(feature = "serde", feature = "serde-bincode-compat"))]
 pub(super) mod serde_bincode_compat {
@@ -1883,6 +1896,59 @@ mod tests {
             let encoded = alloy_rlp::encode(&tx);
             assert!(TxEip8141::decode(&mut encoded.as_slice()).is_err());
         }
+    }
+
+    #[test]
+    fn decoder_rejects_frame_gas_totals_above_u64() {
+        for (limits, reason) in [
+            (
+                vec![
+                    FrameLimits { execution: u64::MAX, state: 0 },
+                    FrameLimits { execution: 1, state: 0 },
+                ],
+                "invalid EIP-8141 frame format: total execution gas exceeds 64 bits",
+            ),
+            (
+                vec![
+                    FrameLimits { execution: 0, state: u64::MAX },
+                    FrameLimits { execution: 0, state: 1 },
+                ],
+                "invalid EIP-8141 frame format: total state gas exceeds 64 bits",
+            ),
+            (
+                vec![FrameLimits { execution: 1 << 63, state: 1 << 63 }],
+                "invalid EIP-8141 frame format: combined execution and state gas exceeds 64 bits",
+            ),
+        ] {
+            let tx = TxEip8141 {
+                frames: limits
+                    .into_iter()
+                    .map(|limits| Frame { limits, ..Default::default() })
+                    .collect(),
+                ..Default::default()
+            };
+            let encoded = alloy_rlp::encode(&tx);
+            assert_eq!(
+                TxEip8141::decode(&mut encoded.as_slice()),
+                Err(alloy_rlp::Error::Custom(reason))
+            );
+            assert_eq!(tx.validate(), Err(reason));
+            let mut typed = Vec::new();
+            tx.encode_2718(&mut typed);
+            assert!(
+                matches!(TxEip8141::decode_2718(&mut typed.as_slice()), Err(Eip2718Error::RlpError(alloy_rlp::Error::Custom(actual))) if actual == reason)
+            );
+        }
+        // The boundary itself is representable; other validity rules are checked later.
+        let tx = TxEip8141 {
+            frames: vec![Frame {
+                limits: FrameLimits { execution: u64::MAX, state: 0 },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let encoded = alloy_rlp::encode(&tx);
+        assert_eq!(TxEip8141::decode(&mut encoded.as_slice()), Ok(tx));
     }
 
     #[test]
