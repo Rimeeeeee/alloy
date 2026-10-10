@@ -13,8 +13,8 @@
 
 use alloy_primitives::{address, b256, bytes, Address, Bytes, B256};
 
-/// The EIP-8272 recent-root predeploy address.
-pub const RECENT_ROOT_ADDRESS: Address = address!("0x0000000000000000000000000000000000008272");
+/// Address of the ordinary EIP-8272 recent-root contract.
+pub const RECENT_ROOT_ADDRESS: Address = address!("0x8272d9679689ea2f307140cdf9002d27dc00ffff");
 
 /// Number of slots retained by each recent-root source's ring buffer.
 pub const RECENT_ROOT_LENGTH: u64 = 8192;
