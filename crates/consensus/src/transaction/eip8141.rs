@@ -101,6 +101,19 @@ fn arbitrary_nonce_keys(
     Ok(Some(keys))
 }
 
+#[cfg(any(test, feature = "arbitrary"))]
+fn arbitrary_frames(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Vec<Frame>> {
+    let mut frames = u.arbitrary::<Vec<Frame>>()?;
+    // Generate representable execution, state, and combined budgets for wire roundtrips.
+    // Explicit malformed-budget tests construct overflowing transactions separately.
+    let limit = u64::MAX / (2 * frames.len().max(1) as u64);
+    for frame in &mut frames {
+        frame.limits.execution = frame.limits.execution.min(limit);
+        frame.limits.state = frame.limits.state.min(limit);
+    }
+    Ok(frames)
+}
+
 /// An EIP-8141 frame transaction.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(any(test, feature = "arbitrary"), derive(arbitrary::Arbitrary))]
@@ -117,6 +130,7 @@ pub struct TxEip8141 {
     /// Intended transaction sender.
     pub sender: Address,
     /// Ordered frames to execute.
+    #[cfg_attr(any(test, feature = "arbitrary"), arbitrary(with = arbitrary_frames))]
     pub frames: Vec<Frame>,
     /// Signature entries available to validation and execution code.
     pub signatures: Vec<FrameSignature>,
@@ -1078,6 +1092,9 @@ impl TxEip8141 {
     }
 
     /// Decodes the fields of the transaction from RLP bytes.
+    ///
+    /// This structural decoder does not validate aggregate frame gas limits. Network decoding
+    /// through [`Decodable`] additionally validates those limits before returning a transaction.
     pub fn rlp_decode_fields(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
         let chain_id = Decodable::decode(buf)?;
         let nonce_keys = if buf.first().is_some_and(|byte| *byte >= 0xc0) {
@@ -1097,9 +1114,6 @@ impl TxEip8141 {
             fees: Decodable::decode(buf)?,
             blob_versioned_hashes: Decodable::decode(buf)?,
         };
-        // Reject malformed budgets before gas-limit derivation can saturate and trigger
-        // an unrelated block-capacity error.
-        validate_frame_gas_limits(&tx.frames).map_err(alloy_rlp::Error::Custom)?;
         Ok(tx)
     }
 
@@ -1706,6 +1720,9 @@ impl Decodable for TxEip8141 {
             return Err(alloy_rlp::Error::UnexpectedLength);
         }
 
+        // Reject malformed budgets before gas-limit derivation can saturate and trigger
+        // an unrelated block-capacity error.
+        validate_frame_gas_limits(&this.frames).map_err(alloy_rlp::Error::Custom)?;
         Ok(this)
     }
 }
@@ -1855,6 +1872,20 @@ mod tests {
         TransactionFees,
     };
     use alloy_primitives::{Address, Bytes, B256, U256};
+
+    #[test]
+    fn arbitrary_frame_budgets_roundtrip() {
+        use arbitrary::Arbitrary;
+        // Maximal random fields used to generate overflowing sums in wire properties.
+        for byte in [0xff, 0x80, 0x55, 0x01, 0x00] {
+            let input = vec![byte; 4096];
+            let tx = TxEip8141::arbitrary(&mut arbitrary::Unstructured::new(&input)).unwrap();
+            validate_frame_gas_limits(&tx.frames).unwrap();
+            let mut encoded = Vec::new();
+            tx.eip2718_encode(&mut encoded);
+            assert_eq!(TxEip8141::decode_2718_exact(&encoded).unwrap(), tx);
+        }
+    }
 
     fn valid_tx() -> TxEip8141 {
         TxEip8141 { frames: vec![Frame::default()], ..Default::default() }
