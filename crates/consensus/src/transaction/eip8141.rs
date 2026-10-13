@@ -9,7 +9,8 @@ use alloy_eips::{
     eip8141::{
         constants::{
             FRAME_TX_DATA_TOKEN_STANDARD_COST, FRAME_TX_INTRINSIC_COST, FRAME_TX_PER_FRAME_COST,
-            FRAME_TX_TOTAL_COST_FLOOR_PER_TOKEN, FRAME_TX_TYPE, MAX_FRAMES, TX_VALUE_COST,
+            FRAME_TX_TOTAL_COST_FLOOR_PER_TOKEN, FRAME_TX_TYPE, KEYED_NONCE_ACCESS_COST,
+            MAX_FRAMES, TX_VALUE_COST,
         },
         has_valid_post_tx_suffix, ApprovalScope, Eip8141Error, Frame, FrameMode, FrameSignature,
         SignatureMessage, TransactionFees,
@@ -1502,6 +1503,7 @@ impl TxEip8141Ref<'_> {
     pub fn calculate_execution_gas_limit_with_token_cost(&self, data_token_cost: u64) -> u64 {
         FRAME_TX_INTRINSIC_COST
             .saturating_add((self.frames.len() as u64).saturating_mul(FRAME_TX_PER_FRAME_COST))
+            .saturating_add(self.keyed_nonce_access_gas())
             .saturating_add(self.frame_calldata_tokens().saturating_mul(data_token_cost))
             .saturating_add(self.signature_verification_gas())
             .saturating_add(self.value_transfer_gas())
@@ -1525,6 +1527,7 @@ impl TxEip8141Ref<'_> {
     pub fn calculate_calldata_floor(&self) -> u64 {
         FRAME_TX_INTRINSIC_COST
             .saturating_add((self.frames.len() as u64).saturating_mul(FRAME_TX_PER_FRAME_COST))
+            .saturating_add(self.keyed_nonce_access_gas())
             .saturating_add(self.signature_verification_gas())
             .saturating_add(self.value_transfer_gas())
             // EIP-7976 charges every calldata byte as four floor tokens.
@@ -1533,6 +1536,13 @@ impl TxEip8141Ref<'_> {
                     .saturating_mul(4)
                     .saturating_mul(FRAME_TX_TOTAL_COST_FLOOR_PER_TOKEN),
             )
+    }
+    /// Prices each non-zero nonce key's cold storage read and write under EIP-8250.
+    pub fn keyed_nonce_access_gas(&self) -> u64 {
+        match self.nonce_keys {
+            None | Some([U256::ZERO]) => 0,
+            Some(keys) => (keys.len() as u64).saturating_mul(KEYED_NONCE_ACCESS_COST),
+        }
     }
 }
 
@@ -2345,6 +2355,43 @@ mod tests {
         assert_eq!(tx.calculate_gas_limit(), expected.max(floor_with_state));
         assert_eq!(tx.gas_limit(), expected.max(floor_with_state));
         assert_eq!(tx.calculate_calldata_floor(), floor);
+    }
+
+    #[test]
+    fn keyed_nonce_access_prices_standard_and_floor_gas() {
+        for floor_binding in [false, true] {
+            for count in [0, 1, 2, 16] {
+                let tx = TxEip8141 {
+                    nonce_keys: Some(if count == 0 {
+                        vec![U256::ZERO]
+                    } else {
+                        (1..=count).map(U256::from).collect()
+                    }),
+                    frames: vec![Frame {
+                        limits: FrameLimits {
+                            execution: if floor_binding { 0 } else { 100_000 },
+                            state: 123,
+                        },
+                        data: Bytes::from(vec![1; if floor_binding { 1_000 } else { 0 }]),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                };
+                let access = count * 12_100;
+                let standard = FRAME_TX_INTRINSIC_COST
+                    + FRAME_TX_PER_FRAME_COST
+                    + tx.frame_calldata_tokens() * 4
+                    + tx.total_frame_execution_gas_limit()
+                    + access;
+                let floor = FRAME_TX_INTRINSIC_COST
+                    + FRAME_TX_PER_FRAME_COST
+                    + tx.frame_calldata_len() * 64
+                    + access;
+                assert_eq!(tx.calculate_execution_gas_limit_with_token_cost(4), standard);
+                assert_eq!(tx.calculate_calldata_floor(), floor);
+                assert_eq!(tx.calculate_gas_limit(), standard.max(floor) + 123);
+            }
+        }
     }
 
     #[test]
