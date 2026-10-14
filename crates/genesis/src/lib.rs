@@ -244,6 +244,10 @@ pub struct GenesisAccount {
         deserialize_with = "deserialize_private_key"
     )]
     pub private_key: Option<B256>,
+    /// Raw chain-specific bytes, encoded as a fifth RLP string in the account trie leaf.
+    #[cfg(feature = "account-ext")]
+    #[serde(default, skip_serializing_if = "alloy_trie::AccountExtension::is_empty")]
+    pub extension: alloy_trie::AccountExtension,
 }
 
 impl GenesisAccount {
@@ -315,6 +319,8 @@ impl From<GenesisAccount> for TrieAccount {
             balance: account.balance,
             storage_root,
             code_hash,
+            #[cfg(feature = "account-ext")]
+            extension: account.extension,
         }
     }
 }
@@ -1244,6 +1250,17 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "account-ext")]
+    #[test]
+    fn genesis_extension_is_committed_to_the_trie() {
+        let account: super::GenesisAccount =
+            serde_json::from_str(r#"{"balance":"0x0","extension":"0x82aa"}"#).unwrap();
+        let pointer = account.extension.as_ptr();
+        let trie = account.into_trie_account();
+        assert_eq!(trie.extension.as_ref(), &[0x82, 0xaa]);
+        assert_eq!(trie.extension.as_ptr(), pointer);
+        assert_ne!(trie.trie_hash_slow(), alloy_trie::TrieAccount::default().trie_hash_slow());
+    }
     use super::*;
     use alloc::{collections::BTreeMap, vec};
     use alloy_primitives::{hex, Bytes};
@@ -1306,6 +1323,8 @@ mod tests {
             code: Some(b"code".into()),
             storage: Some(BTreeMap::default()),
             private_key: None,
+            #[cfg(feature = "account-ext")]
+            extension: Default::default(),
         };
         let mut updated_account = BTreeMap::default();
         updated_account.insert(same_address, new_alloc_account);
@@ -2060,6 +2079,8 @@ mod tests {
                         code: None,
                         storage: None,
                         private_key: None,
+            #[cfg(feature = "account-ext")]
+            extension: Default::default(),
                     },
                 ),
                 (
@@ -2070,6 +2091,8 @@ mod tests {
                         code: Some(Bytes::from_str("0x12").unwrap()),
                         storage: None,
                         private_key: None,
+            #[cfg(feature = "account-ext")]
+            extension: Default::default(),
                     },
                 ),
                 (
@@ -2087,6 +2110,8 @@ mod tests {
     unwrap(),                         ),
                         ])),
                         private_key: None,
+            #[cfg(feature = "account-ext")]
+            extension: Default::default(),
                     },
                 ),
                 (
@@ -2097,6 +2122,8 @@ mod tests {
                         code: None,
                         storage: None,
                         private_key: None,
+            #[cfg(feature = "account-ext")]
+            extension: Default::default(),
                     },
                 ),
                 (
@@ -2107,6 +2134,8 @@ mod tests {
                         code: None,
                         storage: None,
                         private_key: None,
+            #[cfg(feature = "account-ext")]
+            extension: Default::default(),
                     },
                 ),
                 (
@@ -2117,6 +2146,8 @@ mod tests {
                         code: None,
                         storage: None,
                         private_key: None,
+            #[cfg(feature = "account-ext")]
+            extension: Default::default(),
                     },
                 ),
                 (
@@ -2127,6 +2158,8 @@ mod tests {
                         code: None,
                         storage: None,
                         private_key: None,
+            #[cfg(feature = "account-ext")]
+            extension: Default::default(),
                     },
                 ),
                 (
@@ -2137,6 +2170,8 @@ mod tests {
                         code: None,
                         storage: None,
                         private_key: None,
+            #[cfg(feature = "account-ext")]
+            extension: Default::default(),
                     },
                 ),
             ]),
@@ -2395,6 +2430,8 @@ mod tests {
             code: Some(Bytes::from(vec![0x60, 0x61])),
             storage: Some(storage),
             private_key: None,
+            #[cfg(feature = "account-ext")]
+            extension: Default::default(),
         };
 
         // Convert the GenesisAccount to a TrieAccount
@@ -2423,6 +2460,8 @@ mod tests {
             code: None,
             storage: Some(storage),
             private_key: None,
+            #[cfg(feature = "account-ext")]
+            extension: Default::default(),
         };
 
         // Convert the GenesisAccount to a TrieAccount

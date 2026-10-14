@@ -104,6 +104,7 @@ serde = [
 	"alloy-eip7702/serde",
 	"alloy-eip8141/serde",
 	"alloy-eip7928/serde",
+	"alloy-eip8141/serde",
 	"alloy-eip2124/serde",
 	"either/serde",
 	"rand/serde",
@@ -129,6 +130,7 @@ arbitrary = [
 	"alloy-eip7702/k256",
 	"alloy-eip8141/arbitrary",
 	"alloy-eip7928/arbitrary",
+	"alloy-eip8141/arbitrary",
 	"c-kzg?/arbitrary"
 ]
 borsh = [

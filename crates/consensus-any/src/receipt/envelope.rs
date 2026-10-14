@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 use alloy_consensus::{Eip658Value, Receipt, ReceiptEnvelope, ReceiptWithBloom, TxReceipt, TxType};
 use alloy_eips::{
-    eip2718::{Decodable2718, Eip2718Result, Encodable2718},
+    eip2718::{Decodable2718, Eip2718Error, Eip2718Result, Encodable2718},
     Typed2718,
 };
 use alloy_primitives::{bytes::BufMut, Bloom, Log};
@@ -244,12 +244,83 @@ impl Encodable2718 for AnyReceiptEnvelope {
 impl Decodable2718 for AnyReceiptEnvelope {
     fn typed_decode(ty: u8, buf: &mut &[u8]) -> Eip2718Result<Self> {
         match TxType::try_from(ty) {
-            Ok(TxType::Legacy) => ReceiptEnvelope::fallback_decode(buf).map(Self::Ethereum),
+            Ok(TxType::Legacy) => Err(Eip2718Error::UnexpectedType(ty)),
             Ok(_) => ReceiptEnvelope::typed_decode(ty, buf).map(Self::Ethereum),
             Err(_) => Ok(Self::Other { inner: Decodable::decode(buf)?, r#type: ty }),
         }
     }
     fn fallback_decode(buf: &mut &[u8]) -> Eip2718Result<Self> {
         ReceiptEnvelope::fallback_decode(buf).map(Self::Ethereum)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+    use alloy_rlp::Header;
+
+    fn envelope(ty: u8) -> AnyReceiptEnvelope {
+        if ty == 0 {
+            AnyReceiptEnvelope::Ethereum(ReceiptEnvelope::Legacy(Default::default()))
+        } else {
+            AnyReceiptEnvelope::Other { inner: Default::default(), r#type: ty }
+        }
+    }
+
+    /// Wraps an EIP-2718 payload in the RLP string header used by the network encoding of typed
+    /// receipts.
+    fn network_framed(payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        Header { list: false, payload_length: payload.len() }.encode(&mut out);
+        out.extend_from_slice(payload);
+        out
+    }
+
+    #[test]
+    fn legacy_receipt_roundtrips_untagged() {
+        let envelope = envelope(0);
+        let encoded = envelope.encoded_2718();
+        assert!(encoded[0] >= 0xc0, "sanity: legacy receipts are encoded as a bare RLP list");
+        // The network encoding of a legacy receipt is the bare list as well, without a header.
+        let mut network = Vec::new();
+        envelope.network_encode(&mut network);
+        assert_eq!(network, encoded);
+
+        assert_eq!(AnyReceiptEnvelope::decode_2718_exact(&encoded).unwrap(), envelope);
+        assert_eq!(AnyReceiptEnvelope::network_decode(&mut encoded.as_slice()).unwrap(), envelope);
+    }
+
+    #[test]
+    fn typed_receipt_roundtrips() {
+        // A non-Ethereum type id, since this envelope is the catch-all for unknown networks.
+        let envelope = envelope(0x7e);
+        let encoded = envelope.encoded_2718();
+        assert_eq!(encoded[0], 0x7e, "sanity: typed receipts are prefixed with their type byte");
+        let mut network = Vec::new();
+        envelope.network_encode(&mut network);
+        assert_eq!(network, network_framed(&encoded));
+
+        assert_eq!(AnyReceiptEnvelope::decode_2718_exact(&encoded).unwrap(), envelope);
+        assert_eq!(AnyReceiptEnvelope::network_decode(&mut network.as_slice()).unwrap(), envelope);
+    }
+
+    #[test]
+    fn tagged_legacy_receipt_is_rejected() {
+        // Per EIP-2718, legacy receipts are untagged and `0x00` is not an assigned type. The
+        // encoder never emits a `0x00` prefix, so accepting one on decode would re-encode the
+        // receipt differently from the bytes that were decoded.
+        let mut tagged = vec![0x00];
+        tagged.extend_from_slice(&envelope(0).encoded_2718());
+        let tagged_network = network_framed(&tagged);
+
+        assert!(matches!(
+            AnyReceiptEnvelope::decode_2718_exact(&tagged),
+            Err(Eip2718Error::UnexpectedType(0))
+        ));
+        assert!(matches!(
+            AnyReceiptEnvelope::network_decode(&mut tagged_network.as_slice()),
+            Err(Eip2718Error::UnexpectedType(0))
+        ));
     }
 }

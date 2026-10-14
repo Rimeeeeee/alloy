@@ -104,6 +104,9 @@ pub trait Transaction: Typed2718 + fmt::Debug + any::Any + Send + Sync + 'static
     fn nonce(&self) -> u64;
 
     /// Get `gas_limit`.
+    ///
+    /// Under [EIP-8037](https://eips.ethereum.org/EIPS/eip-8037) this single limit funds both execution
+    /// and state gas via the reservoir model.
     fn gas_limit(&self) -> u64;
 
     /// Get `gas_price`.
@@ -792,11 +795,12 @@ mod tests {
 /// tries flattened variants and the legacy variant, and only those) keeps `Flattened` variants
 /// eligible for fallback decode alongside the legacy variant.
 #[cfg(test)]
-mod fallback_decode_flatten_tests {
+mod flatten_decode_tests {
     use crate::{
         SignableTransaction, Signed, TransactionEnvelope, TxEip1559, TxEnvelope, TxLegacy,
     };
-    use alloy_eips::eip2718::{Decodable2718, Encodable2718};
+    use alloc::vec;
+    use alloy_eips::eip2718::{Decodable2718, Eip2718Error, Encodable2718};
     use alloy_primitives::{Address, Signature, U256};
 
     #[derive(Debug, Clone, TransactionEnvelope)]
@@ -833,5 +837,31 @@ mod fallback_decode_flatten_tests {
             MyEnvelope::Ethereum(TxEnvelope::Legacy(_)) => {}
             other => panic!("expected Ethereum(Legacy(..)), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn flattened_variant_rejects_tagged_legacy() {
+        let legacy = TxLegacy {
+            chain_id: None,
+            nonce: 2,
+            gas_limit: 1_000_000,
+            gas_price: 10_000_000_000,
+            to: Address::left_padding_from(&[6]).into(),
+            value: U256::from(7_u64),
+            ..Default::default()
+        }
+        .into_signed(Signature::test_signature().with_parity(true));
+
+        let ethereum_envelope: TxEnvelope = legacy.into();
+        let mut tagged = vec![0x00];
+        tagged.extend_from_slice(&ethereum_envelope.encoded_2718());
+
+        // `MyTxType::try_from(0)` resolves to the flattened `Ethereum(TxType::Legacy)` variant, so
+        // the literal `0x00` type byte is dispatched to the inner envelope's `typed_decode`,
+        // which must reject it just like the top-level `TxEnvelope` does.
+        assert!(matches!(
+            MyEnvelope::decode_2718_exact(&tagged),
+            Err(Eip2718Error::UnexpectedType(0))
+        ));
     }
 }
