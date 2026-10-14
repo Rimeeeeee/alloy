@@ -1099,16 +1099,27 @@ impl TxEip8141 {
     pub fn rlp_decode_fields(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
         let chain_id = Decodable::decode(buf)?;
         let nonce_keys = if buf.first().is_some_and(|byte| *byte >= 0xc0) {
-            let keys = Vec::<U256>::decode(buf)?;
+            let keys = Vec::<U256>::decode(buf).map_err(|err| match err {
+                alloy_rlp::Error::Overflow => {
+                    alloy_rlp::Error::Custom("EIP-8250 nonce key exceeds 256 bits")
+                }
+                err => err,
+            })?;
             alloy_eips::eip8141::validate_nonce_keys(&keys).map_err(alloy_rlp::Error::Custom)?;
             Some(keys)
         } else {
             None
         };
+        let nonce = u64::decode(buf).map_err(|err| match err {
+            alloy_rlp::Error::Overflow if nonce_keys.is_some() => {
+                alloy_rlp::Error::Custom("EIP-8250 nonce sequence exceeds 64 bits")
+            }
+            err => err,
+        })?;
         let tx = Self {
             chain_id,
             nonce_keys,
-            nonce: Decodable::decode(buf)?,
+            nonce,
             sender: Decodable::decode(buf)?,
             frames: Decodable::decode(buf)?,
             signatures: Decodable::decode(buf)?,
@@ -1899,6 +1910,45 @@ mod tests {
 
     fn valid_tx() -> TxEip8141 {
         TxEip8141 { frames: vec![Frame::default()], ..Default::default() }
+    }
+
+    #[test]
+    fn keyed_nonce_width_errors_are_specific() {
+        let tx = TxEip8141 {
+            chain_id: 1,
+            nonce_keys: Some(vec![U256::MAX]),
+            nonce: u64::MAX,
+            ..valid_tx()
+        };
+        let encoded = alloy_rlp::encode(&tx);
+        assert_eq!(TxEip8141::decode(&mut encoded.as_slice()).unwrap(), tx);
+
+        let mut fields = Vec::new();
+        tx.chain_id.encode(&mut fields);
+        let key = alloy_rlp::encode([1u8; 33].as_slice());
+        alloy_rlp::Header { list: true, payload_length: key.len() }.encode(&mut fields);
+        fields.extend_from_slice(&key);
+        assert_eq!(
+            TxEip8141::rlp_decode_fields(&mut fields.as_slice()),
+            Err(alloy_rlp::Error::Custom("EIP-8250 nonce key exceeds 256 bits"))
+        );
+
+        fields.clear();
+        tx.chain_id.encode(&mut fields);
+        tx.nonce_keys.as_ref().unwrap().encode(&mut fields);
+        (U256::from(1) << 64usize).encode(&mut fields);
+        assert_eq!(
+            TxEip8141::rlp_decode_fields(&mut fields.as_slice()),
+            Err(alloy_rlp::Error::Custom("EIP-8250 nonce sequence exceeds 64 bits"))
+        );
+
+        fields.clear();
+        tx.chain_id.encode(&mut fields);
+        (U256::from(1) << 64usize).encode(&mut fields);
+        assert_eq!(
+            TxEip8141::rlp_decode_fields(&mut fields.as_slice()),
+            Err(alloy_rlp::Error::Overflow)
+        );
     }
 
     #[cfg(feature = "serde")]
