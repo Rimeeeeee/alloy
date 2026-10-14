@@ -1551,7 +1551,8 @@ impl TxEip8141Ref<'_> {
     /// Prices each non-zero nonce key's cold storage read and write under EIP-8250.
     pub fn keyed_nonce_access_gas(&self) -> u64 {
         match self.nonce_keys {
-            None | Some([U256::ZERO]) => 0,
+            None => 0,
+            Some([key]) if key.is_zero() => 0,
             Some(keys) => (keys.len() as u64).saturating_mul(KEYED_NONCE_ACCESS_COST),
         }
     }
