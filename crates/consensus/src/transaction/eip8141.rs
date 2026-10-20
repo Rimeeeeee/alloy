@@ -1,6 +1,10 @@
-use alloc::{borrow::ToOwned, string::ToString, vec::Vec};
+use alloc::vec::Vec;
+#[cfg(feature = "serde")]
+use alloc::{borrow::ToOwned, string::ToString};
 use core::{fmt, mem::size_of};
 
+#[cfg(feature = "serde")]
+use alloy_eips::eip8141::SignatureMessage;
 use alloy_eips::{
     eip2718::{Eip2718Error, Eip2718Result, IsTyped2718},
     eip7594::{Decodable7594, Encodable7594},
@@ -13,7 +17,7 @@ use alloy_eips::{
             MAX_FRAMES, TX_VALUE_COST,
         },
         has_valid_post_tx_suffix, ApprovalScope, Eip8141Error, Frame, FrameMode, FrameSignature,
-        SignatureMessage, TransactionFees,
+        TransactionFees,
     },
     Decodable2718, Encodable2718, Typed2718,
 };
