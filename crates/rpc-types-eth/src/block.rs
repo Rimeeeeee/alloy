@@ -655,9 +655,10 @@ impl From<Header> for alloy_serde::WithOtherFields<Header> {
 }
 
 /// BlockOverrides is a set of header fields to override.
+/// Unsupported fields are rejected during deserialization.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(default, rename_all = "camelCase"))]
+#[cfg_attr(feature = "serde", serde(default, rename_all = "camelCase", deny_unknown_fields))]
 pub struct BlockOverrides {
     /// Overrides the block number.
     ///
@@ -1041,6 +1042,45 @@ mod tests {
     fn block_overrides() {
         let s = r#"{"blockNumber": "0xe39dd0"}"#;
         let _overrides = serde_json::from_str::<BlockOverrides>(s).unwrap();
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn block_overrides_reject_unknown_fields() {
+        for value in [serde_json::json!("0x1"), serde_json::Value::Null] {
+            let overrides = serde_json::json!({ "bogusField": value });
+            let error = serde_json::from_value::<BlockOverrides>(overrides.clone())
+                .unwrap_err()
+                .to_string();
+            assert_eq!(
+                error,
+                "unknown field `bogusField`, expected one of `blockNumber`, `number`, `difficulty`, `time`, `timestamp`, `gasLimit`, `coinbase`, `feeRecipient`, `prevRandao`, `random`, `baseFee`, `baseFeePerGas`, `blobBaseFee`, `beaconRoot`, `parentBeaconBlockRoot`, `withdrawals`, `blockHash`"
+            );
+            let payload = serde_json::json!({
+                "blockStateCalls": [{ "blockOverrides": overrides, "calls": [] }]
+            });
+            let payload_error =
+                serde_json::from_value::<crate::simulate::SimulatePayload>(payload).unwrap_err();
+            assert_eq!(payload_error.to_string(), error);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn block_overrides_preserve_aliases_and_hash_keys() {
+        let overrides = serde_json::from_value::<BlockOverrides>(serde_json::json!({
+            "blockNumber": "0x2",
+            "timestamp": "0xc",
+            "blockHash": { "1": B256::ZERO }
+        }))
+        .unwrap();
+        assert_eq!(
+            overrides,
+            BlockOverrides::default()
+                .with_number(U256::from(2))
+                .with_time(12)
+                .append_block_hash(1, B256::ZERO)
+        );
     }
 
     #[test]
