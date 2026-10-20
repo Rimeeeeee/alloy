@@ -143,6 +143,7 @@ This repository contains the following crates:
 - [`alloy-serde`] - [Serde]-related utilities
 - [`alloy-signer`] - Ethereum signer abstraction
   - [`alloy-signer-aws`] - [AWS KMS] signer implementation
+  - [`alloy-signer-azure`] - [Azure Key Vault] signer implementation
   - [`alloy-signer-gcp`] - [GCP KMS] signer implementation
   - [`alloy-signer-ledger`] - [Ledger] signer implementation
   - [`alloy-signer-local`] - Local (private key, keystore, mnemonic, YubiHSM) signer implementations
@@ -186,6 +187,7 @@ This repository contains the following crates:
 [`alloy-serde`]: https://github.com/alloy-rs/alloy/tree/main/crates/serde
 [`alloy-signer`]: https://github.com/alloy-rs/alloy/tree/main/crates/signer
 [`alloy-signer-aws`]: https://github.com/alloy-rs/alloy/tree/main/crates/signer-aws
+[`alloy-signer-azure`]: https://github.com/alloy-rs/alloy/tree/main/crates/signer-azure
 [`alloy-signer-gcp`]: https://github.com/alloy-rs/alloy/tree/main/crates/signer-gcp
 [`alloy-signer-ledger`]: https://github.com/alloy-rs/alloy/tree/main/crates/signer-ledger
 [`alloy-signer-local`]: https://github.com/alloy-rs/alloy/tree/main/crates/signer-local
@@ -200,6 +202,7 @@ This repository contains the following crates:
 [`alloy-ens`]: https://github.com/alloy-rs/alloy/tree/main/crates/ens
 [publish-subscribe]: https://en.wikipedia.org/wiki/Publish%E2%80%93subscribe_pattern
 [AWS KMS]: https://aws.amazon.com/kms
+[Azure Key Vault]: https://learn.microsoft.com/azure/key-vault/
 [GCP KMS]: https://cloud.google.com/kms
 [Ledger]: https://www.ledger.com
 [Tempo]: https://tempo.xyz
@@ -240,14 +243,19 @@ contribution follows the linting rules and passes clippy.
 Because these crates are primarily network-focused, we do not intend to support
 `no_std` for most of them at this time.
 
-The following crates support `no_std`:
+The following crates support `no_std` with default features disabled:
 
-| Crate               | Version Badge                                                                                                 |
-| ------------------- | ------------------------------------------------------------------------------------------------------------- |
-| **alloy-eips**      | [![Crates.io](https://img.shields.io/crates/v/alloy-eips.svg)](https://crates.io/crates/alloy-eips)           |
-| **alloy-genesis**   | [![Crates.io](https://img.shields.io/crates/v/alloy-genesis.svg)](https://crates.io/crates/alloy-genesis)     |
-| **alloy-serde**     | [![Crates.io](https://img.shields.io/crates/v/alloy-serde.svg)](https://crates.io/crates/alloy-serde)         |
+| Crate | Version Badge |
+| --- | --- |
+| **alloy-eips** | [![Crates.io](https://img.shields.io/crates/v/alloy-eips.svg)](https://crates.io/crates/alloy-eips) |
+| **alloy-genesis** | [![Crates.io](https://img.shields.io/crates/v/alloy-genesis.svg)](https://crates.io/crates/alloy-genesis) |
+| **alloy-serde** | [![Crates.io](https://img.shields.io/crates/v/alloy-serde.svg)](https://crates.io/crates/alloy-serde) |
 | **alloy-consensus** | [![Crates.io](https://img.shields.io/crates/v/alloy-consensus.svg)](https://crates.io/crates/alloy-consensus) |
+| **alloy-consensus-any** | [![Crates.io](https://img.shields.io/crates/v/alloy-consensus-any.svg)](https://crates.io/crates/alloy-consensus-any) |
+| **alloy-network-primitives** | [![Crates.io](https://img.shields.io/crates/v/alloy-network-primitives.svg)](https://crates.io/crates/alloy-network-primitives) |
+| **alloy-rpc-types-eth** | [![Crates.io](https://img.shields.io/crates/v/alloy-rpc-types-eth.svg)](https://crates.io/crates/alloy-rpc-types-eth) |
+| **alloy-rpc-types-debug** | [![Crates.io](https://img.shields.io/crates/v/alloy-rpc-types-debug.svg)](https://crates.io/crates/alloy-rpc-types-debug) |
+| **alloy-rpc-types-engine** | [![Crates.io](https://img.shields.io/crates/v/alloy-rpc-types-engine.svg)](https://crates.io/crates/alloy-rpc-types-engine) |
 
 If you would like to add `no_std` support to a crate, please make sure to update
 `scripts/check_no_std.sh` as well.

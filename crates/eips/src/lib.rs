@@ -66,4 +66,6 @@ pub mod eip7928;
 pub mod eip8141;
 pub mod eip8272;
 
+pub mod eip8250;
+
 pub mod eip8282;

@@ -8,7 +8,6 @@ edition = "2021"
 rust-version = "1.94.1"
 authors = ["Alloy Contributors"]
 license = "MIT OR Apache-2.0"
-homepage = "https://github.com/alloy-rs/alloy"
 repository = "https://github.com/alloy-rs/alloy"
 exclude = ["benches/", "tests/", "testdata/"]
 
@@ -61,6 +60,7 @@ alloy-rpc-types = { version = "2.5.0", path = "crates/rpc-types", default-featur
 alloy-serde = { version = "2.5.0", path = "crates/serde", default-features = false }
 alloy-signer = { version = "2.5.0", path = "crates/signer", default-features = false }
 alloy-signer-aws = { version = "2.5.0", path = "crates/signer-aws", default-features = false }
+alloy-signer-azure = { version = "2.5.0", path = "crates/signer-azure", default-features = false }
 alloy-signer-gcp = { version = "2.5.0", path = "crates/signer-gcp", default-features = false }
 alloy-signer-ledger = { version = "2.5.0", path = "crates/signer-ledger", default-features = false }
 alloy-signer-local = { version = "2.5.0", path = "crates/signer-local", default-features = false }
@@ -170,6 +170,12 @@ url = "2.5"
 arbitrary = "1.3"
 assert_matches = "1.5"
 ci_info = "0.14.14"
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 similar-asserts = "1.5"
 tempfile = "3.20"
 tower-http = "0.6.1"
+
+[profile.dev.package]
+blst.opt-level = 3
+c-kzg.opt-level = 3
+secp256k1-sys.opt-level = 3

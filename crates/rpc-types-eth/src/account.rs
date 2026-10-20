@@ -29,6 +29,30 @@ pub struct AccountInfo {
 }
 
 impl AccountInfo {
+    /// Creates account information with an empty extension.
+    ///
+    /// The extension carries chain-specific data and only exists with the `account-ext` feature.
+    /// Use `with_extension` to attach one.
+    pub const fn new(balance: U256, nonce: u64, code: Bytes) -> Self {
+        Self {
+            balance,
+            nonce,
+            code,
+            #[cfg(feature = "account-ext")]
+            extension: alloy_trie::AccountExtension::new(),
+        }
+    }
+
+    /// Returns this account information with the given chain-specific extension.
+    ///
+    /// This replaces the extension, which [`Self::new`] leaves empty.
+    #[inline]
+    #[cfg(feature = "account-ext")]
+    pub fn with_extension(mut self, extension: impl Into<alloy_trie::AccountExtension>) -> Self {
+        self.extension = extension.into();
+        self
+    }
+
     /// Returns true if the code hash is the Keccak256 hash of the empty string `""`.
     #[inline]
     pub fn is_empty_code_hash(&self) -> bool {
@@ -112,8 +136,9 @@ pub struct EIP1186AccountProofResponse {
 
 #[cfg(feature = "serde")]
 impl EIP1186AccountProofResponse {
-    /// After `SpuriousDragon` empty account is defined as account with nonce == 0 && balance == 0
-    /// && bytecode = None (or hash is [`KECCAK_EMPTY`](alloy_consensus::constants::KECCAK_EMPTY)).
+    /// Returns whether the proof describes an account with zero nonce and balance, the empty
+    /// storage trie root ([`EMPTY_ROOT_HASH`](alloy_consensus::constants::EMPTY_ROOT_HASH)), and
+    /// the empty code hash ([`KECCAK_EMPTY`](alloy_consensus::constants::KECCAK_EMPTY)).
     pub fn is_empty(&self) -> bool {
         self.nonce == 0
             && self.balance.is_zero()
