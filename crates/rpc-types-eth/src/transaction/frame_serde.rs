@@ -1,88 +1,10 @@
 //! JSON adapters for frame transaction requests.
 
-use alloc::{string::String, vec::Vec};
+use alloc::{borrow::Cow, string::String, vec::Vec};
 use alloy_eips::eip8141::{FrameAddress, FrameSignature, SignatureMessage, SignatureScheme};
 use alloy_primitives::{Bytes, U256};
+use core::{fmt, marker::PhantomData};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-// Preserve duplicate-field rejection while buffering JSON for full-width fee normalization.
-// Every nested array and object must use this parser, rather than Value's last-key-wins parser.
-struct RequestValue(serde_json::Value);
-
-impl<'de> Deserialize<'de> for RequestValue {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct ValueVisitor;
-        impl<'de> serde::de::Visitor<'de> for ValueVisitor {
-            type Value = serde_json::Value;
-
-            fn expecting(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                formatter.write_str("a JSON value without duplicate object fields")
-            }
-
-            fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Self::Value, E> {
-                Ok(value.into())
-            }
-
-            fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
-                Ok(value.into())
-            }
-
-            fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
-                Ok(value.into())
-            }
-
-            fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
-                serde_json::Number::from_f64(value)
-                    .map(serde_json::Value::Number)
-                    .ok_or_else(|| E::invalid_value(serde::de::Unexpected::Float(value), &self))
-            }
-
-            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
-                Ok(value.into())
-            }
-
-            fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
-                Ok(value.into())
-            }
-
-            fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-                Ok(serde_json::Value::Null)
-            }
-
-            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-                Ok(serde_json::Value::Null)
-            }
-
-            fn visit_seq<S: serde::de::SeqAccess<'de>>(
-                self,
-                mut sequence: S,
-            ) -> Result<Self::Value, S::Error> {
-                let mut values = Vec::new();
-                while let Some(RequestValue(value)) = sequence.next_element()? {
-                    values.push(value);
-                }
-                Ok(serde_json::Value::Array(values))
-            }
-
-            fn visit_map<M: serde::de::MapAccess<'de>>(
-                self,
-                mut map: M,
-            ) -> Result<Self::Value, M::Error> {
-                let mut object = serde_json::Map::new();
-                while let Some((key, RequestValue(value))) = map.next_entry::<String, _>()? {
-                    if object.insert(key.clone(), value).is_some() {
-                        return Err(serde::de::Error::custom(alloc::format!(
-                            "duplicate field `{key}`"
-                        )));
-                    }
-                }
-                Ok(serde_json::Value::Object(object))
-            }
-        }
-
-        deserializer.deserialize_any(ValueVisitor).map(Self)
-    }
-}
 
 // Keep ordinary request fee fields and their derived representation unchanged. Frame fees
 // that do not fit those fields are normalized to the canonical top-level JSON fields.
@@ -93,24 +15,35 @@ impl Serialize for super::TransactionRequest {
             return Self::serialize(self, serializer);
         };
 
-        struct Fields<'a>(&'a super::TransactionRequest);
-        impl Serialize for Fields<'_> {
-            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-                super::TransactionRequest::serialize(self.0, serializer)
-            }
+        FrameFeeRequest {
+            fields: RequestFields(self),
+            max_fee: self.max_fee.is_none().then_some(fees.max_fee),
+            max_priority_fee_per_gas: self
+                .max_priority_fee_per_gas
+                .is_none()
+                .then_some(fees.max_priority_fee_per_gas),
         }
-
-        let mut value = serde_json::to_value(Fields(self)).map_err(serde::ser::Error::custom)?;
-        if self.max_fee.is_none() {
-            value["maxFee"] =
-                serde_json::to_value(fees.max_fee).map_err(serde::ser::Error::custom)?;
-        }
-        if self.max_priority_fee_per_gas.is_none() {
-            value["maxPriorityFeePerGas"] = serde_json::to_value(fees.max_priority_fee_per_gas)
-                .map_err(serde::ser::Error::custom)?;
-        }
-        value.serialize(serializer)
+        .serialize(serializer)
     }
+}
+
+struct RequestFields<'a>(&'a super::TransactionRequest);
+
+impl Serialize for RequestFields<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        super::TransactionRequest::serialize(self.0, serializer)
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FrameFeeRequest<'a> {
+    #[serde(flatten)]
+    fields: RequestFields<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_fee: Option<U256>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_priority_fee_per_gas: Option<U256>,
 }
 
 impl<'de> Deserialize<'de> for super::TransactionRequest {
@@ -119,32 +52,152 @@ impl<'de> Deserialize<'de> for super::TransactionRequest {
             return Self::deserialize(deserializer);
         }
 
-        let mut value = RequestValue::deserialize(deserializer)?.0;
-        let mut wide_priority = None;
-        if let Some(object) = value.as_object_mut() {
-            let is_frame = ["maxFee", "frames", "signatures", "nonceKeys"]
-                .iter()
-                .any(|field| object.contains_key(*field));
-            if is_frame {
-                if let Some(priority) = object.get("maxPriorityFeePerGas") {
-                    let priority: Option<U256> = serde_json::from_value(priority.clone())
-                        .map_err(serde::de::Error::custom)?;
-                    if let Some(priority) = priority.filter(|fee| *fee > U256::from(u128::MAX)) {
-                        object.remove("maxPriorityFeePerGas");
-                        wide_priority = Some(priority);
-                    }
-                }
-            }
-        }
+        deserializer.deserialize_map(RequestVisitor)
+    }
+}
 
-        let mut request = Self::deserialize(value).map_err(serde::de::Error::custom)?;
+// Intercept only the priority fee. All other values go straight to the derived request
+// deserializer, retaining its duplicate checks, flattening, and borrowed input handling.
+struct RequestVisitor;
+
+impl<'de> serde::de::Visitor<'de> for RequestVisitor {
+    type Value = super::TransactionRequest;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a transaction request object")
+    }
+
+    fn visit_map<M: serde::de::MapAccess<'de>>(self, map: M) -> Result<Self::Value, M::Error> {
+        let mut wide_priority = None;
+        let mut request =
+            super::TransactionRequest::deserialize(serde::de::value::MapAccessDeserializer::new(
+                RequestMap { map, wide_priority: &mut wide_priority, priority_field: false },
+            ))?;
         if let Some(max_priority_fee_per_gas) = wide_priority {
+            if request.max_fee.is_none()
+                && request.frames.is_none()
+                && request.signatures.is_none()
+                && request.nonce_keys.is_none()
+            {
+                return Err(serde::de::Error::custom(
+                    "maxPriorityFeePerGas exceeds u128 for an ordinary transaction",
+                ));
+            }
             let max_fee =
                 request.max_fee.ok_or_else(|| serde::de::Error::missing_field("maxFee"))?;
             request.eip8141_fees =
                 Some(alloy_eips::eip8141::TransactionFees { max_fee, max_priority_fee_per_gas });
         }
         Ok(request)
+    }
+}
+
+struct RequestMap<'a, M> {
+    map: M,
+    wide_priority: &'a mut Option<U256>,
+    priority_field: bool,
+}
+
+impl<'de, M: serde::de::MapAccess<'de>> serde::de::MapAccess<'de> for RequestMap<'_, M> {
+    type Error = M::Error;
+
+    fn next_key_seed<K: serde::de::DeserializeSeed<'de>>(
+        &mut self,
+        seed: K,
+    ) -> Result<Option<K::Value>, Self::Error> {
+        let Some(RequestKey(key)) = self.map.next_key()? else { return Ok(None) };
+        self.priority_field = key == "maxPriorityFeePerGas";
+        match key {
+            Cow::Borrowed(key) => {
+                seed.deserialize(serde::de::value::BorrowedStrDeserializer::new(key)).map(Some)
+            }
+            Cow::Owned(key) => {
+                seed.deserialize(serde::de::value::StringDeserializer::new(key)).map(Some)
+            }
+        }
+    }
+
+    fn next_value_seed<V: serde::de::DeserializeSeed<'de>>(
+        &mut self,
+        seed: V,
+    ) -> Result<V::Value, Self::Error> {
+        if !self.priority_field {
+            return self.map.next_value_seed(seed);
+        }
+        let priority = self.map.next_value::<Option<U256>>()?;
+        let value = priority.and_then(|priority| {
+            if priority <= U256::from(u128::MAX) {
+                Some(priority.to::<u128>())
+            } else {
+                *self.wide_priority = Some(priority);
+                None
+            }
+        });
+        seed.deserialize(NarrowPriority { value, error: PhantomData })
+    }
+
+    fn size_hint(&self) -> Option<usize> {
+        self.map.size_hint()
+    }
+}
+
+struct RequestKey<'de>(Cow<'de, str>);
+
+impl<'de> Deserialize<'de> for RequestKey<'de> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct KeyVisitor;
+        impl<'de> serde::de::Visitor<'de> for KeyVisitor {
+            type Value = RequestKey<'de>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a transaction request field")
+            }
+
+            fn visit_borrowed_str<E: serde::de::Error>(
+                self,
+                key: &'de str,
+            ) -> Result<Self::Value, E> {
+                Ok(RequestKey(Cow::Borrowed(key)))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, key: &str) -> Result<Self::Value, E> {
+                Ok(RequestKey(Cow::Owned(key.into())))
+            }
+
+            fn visit_string<E: serde::de::Error>(self, key: String) -> Result<Self::Value, E> {
+                Ok(RequestKey(Cow::Owned(key)))
+            }
+        }
+
+        deserializer.deserialize_identifier(KeyVisitor)
+    }
+}
+
+struct NarrowPriority<E> {
+    value: Option<u128>,
+    error: PhantomData<E>,
+}
+
+impl<'de, E: serde::de::Error> Deserializer<'de> for NarrowPriority<E> {
+    type Error = E;
+
+    fn deserialize_any<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, E> {
+        match self.value {
+            Some(value) => visitor.visit_u128(value),
+            None => visitor.visit_unit(),
+        }
+    }
+
+    fn deserialize_option<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, E> {
+        match self.value {
+            Some(value) => visitor.visit_some(serde::de::value::U128Deserializer::new(value)),
+            None => visitor.visit_none(),
+        }
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes byte_buf
+        unit unit_struct newtype_struct seq tuple tuple_struct map struct enum identifier ignored_any
     }
 }
 
@@ -353,6 +406,74 @@ mod tests {
             let error = serde_json::from_str::<TransactionRequest>(duplicate).unwrap_err();
             assert!(error.to_string().contains("duplicate field"), "{error}");
             assert!(serde_json::from_str::<TransactionRequest>(valid).is_ok());
+        }
+    }
+
+    #[test]
+    fn streaming_priority_fees_preserve_field_order_readers_and_extensions() {
+        let priority = alloc::format!("{:#x}", U256::MAX);
+        for raw in [
+            alloc::format!(
+                r#"{{"maxPriorityFeePerGas":"{priority}","maxFee":"{priority}","frames":[],"sourceHash":"0xbeef"}}"#
+            ),
+            alloc::format!(
+                r#"{{"frames":[],"sourceHash":"0xbeef","maxFee":"{priority}","maxPriorityFeePerGas":"{priority}"}}"#
+            ),
+            alloc::format!(
+                r#"{{"maxPriorityFeePer\u0047as":"{priority}","maxFee":"{priority}","frames":[],"sourceHash":"0xbeef"}}"#
+            ),
+        ] {
+            let request: TransactionRequest = serde_json::from_str(&raw).unwrap();
+            assert_eq!(request.max_priority_fee_per_gas, None);
+            assert_eq!(request.eip8141_fees.as_ref().unwrap().max_priority_fee_per_gas, U256::MAX);
+            assert_eq!(
+                serde_json::from_slice::<TransactionRequest>(raw.as_bytes()).unwrap(),
+                request
+            );
+            assert_eq!(
+                serde_json::from_reader::<_, TransactionRequest>(raw.as_bytes()).unwrap(),
+                request
+            );
+            let wrapped: alloy_serde::WithOtherFields<TransactionRequest> =
+                serde_json::from_str(&raw).unwrap();
+            assert_eq!(wrapped.inner, request);
+            assert_eq!(wrapped.other.get("sourceHash"), Some(&json!("0xbeef")));
+        }
+    }
+
+    #[test]
+    fn streaming_priority_fees_preserve_null_numeric_and_duplicate_validation() {
+        for (raw, priority) in [("null", None), ("1", Some(1)), (r#""0x1""#, Some(1))] {
+            let raw = alloc::format!(r#"{{"maxPriorityFeePerGas":{raw}}}"#);
+            let request: TransactionRequest = serde_json::from_str(&raw).unwrap();
+            assert_eq!(request.max_priority_fee_per_gas, priority);
+            assert!(request.eip8141_fees.is_none());
+        }
+        for raw in [
+            r#"{"maxFee":"0x1","maxPriorityFeePerGas":"0x100000000000000000000000000000000","maxPriorityFeePerGas":null}"#,
+            r#"{"maxFee":"0x1","maxPriorityFeePerGas":null,"maxPriorityFeePerGas":"0x100000000000000000000000000000000"}"#,
+            r#"{"maxFee":"0x1","maxPriorityFeePerGas":"0x100000000000000000000000000000000","maxPriorityFeePer\u0047as":"0x1"}"#,
+        ] {
+            let error = serde_json::from_str::<TransactionRequest>(raw).unwrap_err();
+            assert!(error.to_string().contains("duplicate field"), "{error}");
+        }
+    }
+
+    #[test]
+    fn streaming_requests_preserve_large_ordinary_and_frame_calldata() {
+        let data = alloy_primitives::Bytes::from(alloc::vec![0xab; 65_536]);
+        let ordinary = TransactionRequest::default()
+            .input(crate::TransactionInput::new(data.clone()))
+            .max_priority_fee_per_gas(1);
+        let framed: TransactionRequest = TxEip8141 {
+            frames: alloc::vec![Frame { data, ..Default::default() }],
+            fees: TransactionFees { max_fee: U256::MAX, max_priority_fee_per_gas: U256::MAX },
+            ..Default::default()
+        }
+        .into();
+        for request in [ordinary, framed] {
+            let json = serde_json::to_string(&request).unwrap();
+            assert_eq!(serde_json::from_str::<TransactionRequest>(&json).unwrap(), request);
         }
     }
 
