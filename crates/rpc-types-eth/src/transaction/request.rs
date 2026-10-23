@@ -30,7 +30,7 @@ use core::{hash::Hash, str::FromStr};
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(any(test, feature = "arbitrary"), derive(arbitrary::Arbitrary))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+#[cfg_attr(feature = "serde", serde(remote = "Self", rename_all = "camelCase"))]
 #[doc(alias = "TxRequest")]
 pub struct TransactionRequest {
     /// The address of the transaction author.
@@ -161,12 +161,9 @@ pub struct TransactionRequest {
         )
     )]
     pub signatures: Option<Vec<FrameSignature>>,
-    /// Full-width frame fees. Each explicit top-level fee overrides its corresponding value.
-    /// Conversions preserve priority fees that cannot fit in the top-level `u128` field here.
-    #[cfg_attr(
-        feature = "serde",
-        serde(default, rename = "fees", skip_serializing_if = "Option::is_none")
-    )]
+    /// Full-width frame fee storage when the priority fee cannot fit in `u128`.
+    /// JSON uses the canonical top-level fee fields. Explicit fields override these values.
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub eip8141_fees: Option<TransactionFees>,
     /// Total frame transaction fee budget in wei.
     #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
@@ -996,7 +993,12 @@ impl TransactionRequest {
     /// assert_eq!(request.minimal_tx_type(), TxType::Eip4844);
     /// ```
     pub const fn minimal_tx_type(&self) -> TxType {
-        if self.frames.is_some() || self.signatures.is_some() || self.nonce_keys.is_some() {
+        if self.frames.is_some()
+            || self.signatures.is_some()
+            || self.nonce_keys.is_some()
+            || self.max_fee.is_some()
+            || self.eip8141_fees.is_some()
+        {
             TxType::Eip8141
         } else if self.authorization_list.is_some() {
             TxType::Eip7702
@@ -1093,7 +1095,12 @@ impl TransactionRequest {
             return TxType::Eip8141;
         }
 
-        if self.frames.is_some() || self.signatures.is_some() || self.nonce_keys.is_some() {
+        if self.frames.is_some()
+            || self.signatures.is_some()
+            || self.nonce_keys.is_some()
+            || self.max_fee.is_some()
+            || self.eip8141_fees.is_some()
+        {
             TxType::Eip8141
         } else if self.authorization_list.is_some() {
             TxType::Eip7702
@@ -1921,7 +1928,7 @@ pub(super) mod serde_bincode_compat {
                 frames: vec![Default::default()],
                 fees: alloy_eips::eip8141::TransactionFees {
                     max_fee: U256::MAX,
-                    max_priority_fee_per_gas: U256::from(1),
+                    max_priority_fee_per_gas: U256::MAX,
                 },
                 ..Default::default()
             };

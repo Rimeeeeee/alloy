@@ -7,7 +7,7 @@ use alloy_consensus::{
 };
 use alloy_eips::{
     eip7594::BlobTransactionSidecarEip7594,
-    eip8141::{Frame, FrameReceiptPayload, TransactionFees},
+    eip8141::{Frame, FrameMode, FrameReceiptPayload, TransactionFees, ATOMIC_BATCH_FLAG},
     Decodable2718, Encodable2718,
 };
 use alloy_network::{AnyReceiptEnvelope, AnyTxEnvelope, Ethereum, NetworkTransactionBuilder};
@@ -280,4 +280,50 @@ fn generic_wallet_support_remains_available() {
     }
     check::<Ethereum>();
     check::<alloy_network::AnyNetwork>();
+}
+
+#[test]
+fn frame_builders_reject_atomic_batches_ending_on_assertions() {
+    let reason = "EIP-7906 atomic batch cannot end on an ASSERT frame";
+    for mode in [FrameMode::Default, FrameMode::Sender] {
+        for flags in 0..=3 {
+            let mut tx = frame_tx();
+            tx.frames = vec![
+                Frame { mode, flags: ATOMIC_BATCH_FLAG, ..Default::default() },
+                Frame { mode: FrameMode::Assert, flags, ..Default::default() },
+            ];
+            let tx = TxEip8141::decode_2718_exact(&tx.encoded_2718()).unwrap();
+            let request: TransactionRequest = tx.into();
+            assert_eq!(request.complete_8141(), Err(vec![reason]));
+            let error = request.clone().build_8141().unwrap_err();
+            assert_eq!(error.to_string(), reason);
+            assert_eq!(error.value(), &request);
+            assert_eq!(request.clone().build_typed_tx(), Err(request.clone()));
+            assert!(<TransactionRequest as NetworkTransactionBuilder<Ethereum>>::build_unsigned(
+                request
+            )
+            .is_err());
+        }
+    }
+}
+
+#[test]
+fn frame_builders_accept_atomic_batches_closed_before_assertions() {
+    let mut tx = frame_tx();
+    tx.frames = vec![
+        Frame { flags: 3, ..Default::default() },
+        Frame { flags: ATOMIC_BATCH_FLAG, ..Default::default() },
+        Frame { mode: FrameMode::Sender, ..Default::default() },
+        Frame { mode: FrameMode::Assert, ..Default::default() },
+        Frame { mode: FrameMode::Assert, flags: 3, ..Default::default() },
+    ];
+    let request: TransactionRequest = tx.clone().into();
+    assert_eq!(request.complete_8141(), Ok(()));
+    assert_eq!(request.clone().build_8141().unwrap(), tx);
+    assert_eq!(request.clone().build_typed_tx().unwrap(), TypedTransaction::Eip8141(tx.clone()));
+    assert_eq!(
+        <TransactionRequest as NetworkTransactionBuilder<Ethereum>>::build_unsigned(request)
+            .unwrap(),
+        TypedTransaction::Eip8141(tx)
+    );
 }

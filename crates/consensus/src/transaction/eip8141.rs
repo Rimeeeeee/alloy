@@ -1383,6 +1383,13 @@ impl TxEip8141Ref<'_> {
             if frame.is_assertion() && frame.is_atomic_batch() {
                 return Err("EIP-7906 atomic flag is invalid on ASSERT frames");
             }
+            if frame.is_assertion()
+                && index
+                    .checked_sub(1)
+                    .is_some_and(|previous| self.frames[previous].is_atomic_batch())
+            {
+                return Err("EIP-7906 atomic batch cannot end on an ASSERT frame");
+            }
             if !frame.value.is_zero() && frame.mode != FrameMode::Sender {
                 return Err("frame value is only valid in sender mode");
             }
@@ -2101,6 +2108,50 @@ mod tests {
 
         tx.frames = vec![Frame::default(), Frame { flags: ATOMIC_BATCH_FLAG, ..assertion }];
         assert_eq!(tx.validate(), Err("EIP-7906 atomic flag is invalid on ASSERT frames"));
+    }
+
+    #[test]
+    fn rejects_atomic_batches_ending_on_assertion_after_wire_roundtrip() {
+        let reason = "EIP-7906 atomic batch cannot end on an ASSERT frame";
+        for mode in [FrameMode::Default, FrameMode::Sender] {
+            for prefix in [false, true] {
+                for flags in 0..=3 {
+                    let mut frames = if prefix { vec![Frame::default()] } else { vec![] };
+                    frames.extend([
+                        Frame { mode, flags: ATOMIC_BATCH_FLAG, ..Default::default() },
+                        Frame { mode: FrameMode::Assert, flags, ..Default::default() },
+                    ]);
+                    let tx = TxEip8141 { frames, ..Default::default() };
+                    assert_eq!(tx.validate(), Err(reason));
+                    assert_eq!(tx.as_frame_ref().validate_unsigned(), Err(reason));
+
+                    // Wire decoding preserves fields; structural validation rejects the boundary.
+                    let decoded = TxEip8141::decode_2718_exact(&tx.encoded_2718()).unwrap();
+                    assert_eq!(decoded, tx);
+                    assert_eq!(decoded.validate(), Err(reason));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn accepts_closed_atomic_batch_before_assertion_suffix_after_wire_roundtrip() {
+        let tx = TxEip8141 {
+            frames: vec![
+                Frame { flags: ApprovalScope::ExecutionAndPayment.into(), ..Default::default() },
+                Frame { flags: ATOMIC_BATCH_FLAG, ..Default::default() },
+                Frame { mode: FrameMode::Sender, flags: ATOMIC_BATCH_FLAG, ..Default::default() },
+                Frame { mode: FrameMode::Sender, ..Default::default() },
+                Frame { mode: FrameMode::Assert, flags: 3, ..Default::default() },
+                Frame { mode: FrameMode::Assert, ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(tx.validate(), Ok(()));
+        assert_eq!(tx.as_frame_ref().validate_unsigned(), Ok(()));
+        let decoded = TxEip8141::decode_2718_exact(&tx.encoded_2718()).unwrap();
+        assert_eq!(decoded, tx);
+        assert_eq!(decoded.validate(), Ok(()));
     }
 
     #[test]
