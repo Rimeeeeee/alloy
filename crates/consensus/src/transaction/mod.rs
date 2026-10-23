@@ -173,8 +173,12 @@ pub trait Transaction: Typed2718 + fmt::Debug + any::Any + Send + Sync + 'static
     #[inline]
     fn effective_gas_price_u256(&self, base_fee: Option<u64>) -> U256 {
         let max_fee = self.max_fee_per_gas_u256();
-        let Some(base_fee) = base_fee else { return max_fee };
-        let Some(priority_fee) = self.max_priority_fee_per_gas_u256() else { return max_fee };
+        let Some(base_fee) = base_fee else {
+            return max_fee;
+        };
+        let Some(priority_fee) = self.max_priority_fee_per_gas_u256() else {
+            return max_fee;
+        };
         max_fee.min(U256::from(base_fee).saturating_add(priority_fee))
     }
 

@@ -241,10 +241,9 @@ mod tests {
         let request = TransactionRequest {
             from: Some(Address::ZERO),
             nonce: Some(0),
-            nonce_keys: Some(vec![U256::ZERO]),
+            nonce_keys: Some(vec![]),
             max_priority_fee_per_gas: Some(1),
-            max_fee_per_gas: Some(2),
-            max_fee_per_blob_gas: Some(0),
+            max_fee: Some(U256::from(2)),
             transaction_type: Some(TxType::Eip8141 as u8),
             frames: Some(vec![Frame::default().into()]),
             signatures: Some(Vec::new()),

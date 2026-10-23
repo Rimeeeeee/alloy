@@ -162,12 +162,15 @@ pub struct TransactionRequest {
     )]
     pub signatures: Option<Vec<FrameSignature>>,
     /// Full-width frame fees. Each explicit top-level fee overrides its corresponding value.
-    /// Conversions omit top-level fees that cannot fit in `u128`, preserving them here instead.
+    /// Conversions preserve priority fees that cannot fit in the top-level `u128` field here.
     #[cfg_attr(
         feature = "serde",
         serde(default, rename = "fees", skip_serializing_if = "Option::is_none")
     )]
     pub eip8141_fees: Option<TransactionFees>,
+    /// Total frame transaction fee budget in wei.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub max_fee: Option<U256>,
 }
 
 struct FrameFields {
@@ -234,6 +237,7 @@ impl TransactionRequest {
             frames: None,
             signatures: None,
             eip8141_fees: None,
+            max_fee: None,
         }
     }
 
@@ -704,29 +708,23 @@ impl TransactionRequest {
         })
     }
 
-    /// Resolves frame fees. Explicit narrow fields override the full-width fallback.
+    /// Resolves frame fees. Explicit top-level fields override the full-width fallback.
     fn resolved_frame_fees(&self) -> Result<TransactionFees, &'static str> {
         let full = self.eip8141_fees.as_ref();
         Ok(TransactionFees {
-            max_fee_per_gas: self
-                .max_fee_per_gas
-                .map(U256::from)
-                .or_else(|| full.map(|f| f.max_fee_per_gas))
-                .ok_or("max_fee_per_gas")?,
+            max_fee: self.max_fee.or_else(|| full.map(|f| f.max_fee)).ok_or("max_fee")?,
             max_priority_fee_per_gas: self
                 .max_priority_fee_per_gas
                 .map(U256::from)
                 .or_else(|| full.map(|f| f.max_priority_fee_per_gas))
                 .ok_or("max_priority_fee_per_gas")?,
-            max_fee_per_blob_gas: self
-                .max_fee_per_blob_gas
-                .map(U256::from)
-                .or_else(|| full.map(|f| f.max_fee_per_blob_gas))
-                .ok_or("max_fee_per_blob_gas")?,
         })
     }
 
     fn validate_8141_fields(&self, allow_placeholders: bool) -> Result<FrameFields, &'static str> {
+        if self.max_fee_per_gas.is_some() || self.max_fee_per_blob_gas.is_some() {
+            return Err("per-resource fee caps are invalid for EIP-8141");
+        }
         let sender = self.from.ok_or("sender")?;
         self.nonce.ok_or("nonce")?;
         let frames = self
@@ -870,6 +868,7 @@ impl TransactionRequest {
         let preferred_type = self.preferred_type();
         if preferred_type != TxType::Eip8141 {
             self.eip8141_fees = None;
+            self.max_fee = None;
         }
         match preferred_type {
             TxType::Legacy => {
@@ -1554,9 +1553,8 @@ impl From<TxEip8141> for TransactionRequest {
         } = tx;
         Self {
             from: Some(sender),
-            max_fee_per_gas: fees.max_fee_per_gas.try_into().ok(),
+            max_fee: Some(fees.max_fee),
             max_priority_fee_per_gas: fees.max_priority_fee_per_gas.try_into().ok(),
-            max_fee_per_blob_gas: fees.max_fee_per_blob_gas.try_into().ok(),
             nonce: Some(nonce),
             nonce_keys,
             chain_id: Some(chain_id),
@@ -1564,10 +1562,7 @@ impl From<TxEip8141> for TransactionRequest {
             transaction_type: Some(ty),
             frames: Some(frames.into_iter().map(Into::into).collect()),
             signatures: Some(signatures),
-            eip8141_fees: (fees.max_fee_per_gas > U256::from(u128::MAX)
-                || fees.max_priority_fee_per_gas > U256::from(u128::MAX)
-                || fees.max_fee_per_blob_gas > U256::from(u128::MAX))
-            .then_some(fees),
+            eip8141_fees: (fees.max_priority_fee_per_gas > U256::from(u128::MAX)).then_some(fees),
             ..Default::default()
         }
     }
@@ -1768,6 +1763,8 @@ pub(super) mod serde_bincode_compat {
         pub signatures: Option<Cow<'a, Vec<FrameSignature>>>,
         /// Full-width frame fees.
         pub eip8141_fees: Option<alloy_eips::eip8141::TransactionFees>,
+        /// Total frame transaction fee budget in wei.
+        pub max_fee: Option<U256>,
     }
 
     /// Bincode-compatible frame request without omitted fields.
@@ -1837,6 +1834,7 @@ pub(super) mod serde_bincode_compat {
                 frames: value.frames.as_ref().map(|frames| frames.iter().map(Into::into).collect()),
                 signatures: value.signatures.as_ref().map(Cow::Borrowed),
                 eip8141_fees: value.eip8141_fees,
+                max_fee: value.max_fee,
             }
         }
     }
@@ -1871,6 +1869,7 @@ pub(super) mod serde_bincode_compat {
                 frames: value.frames.map(|frames| frames.into_iter().map(Into::into).collect()),
                 signatures: value.signatures.map(Cow::into_owned),
                 eip8141_fees: value.eip8141_fees,
+                max_fee: value.max_fee,
             }
         }
     }
@@ -1921,9 +1920,8 @@ pub(super) mod serde_bincode_compat {
                 nonce: 128,
                 frames: vec![Default::default()],
                 fees: alloy_eips::eip8141::TransactionFees {
-                    max_fee_per_gas: U256::MAX,
+                    max_fee: U256::MAX,
                     max_priority_fee_per_gas: U256::from(1),
-                    max_fee_per_blob_gas: U256::ZERO,
                 },
                 ..Default::default()
             };

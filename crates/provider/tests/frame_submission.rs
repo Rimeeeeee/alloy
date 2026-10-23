@@ -67,9 +67,8 @@ async fn frame_submission_keeps_sidecar_and_full_width_fees() {
         sender: Address::repeat_byte(1),
         frames: vec![Frame::default()],
         fees: TransactionFees {
-            max_fee_per_gas: U256::from(1) << 128,
+            max_fee: U256::from(1) << 128,
             max_priority_fee_per_gas: U256::from(1),
-            max_fee_per_blob_gas: U256::from(1) << 128,
         },
         blob_versioned_hashes: sidecar.versioned_hashes().collect(),
         ..Default::default()

@@ -21,11 +21,7 @@ fn frame_tx() -> TxEip8141 {
         nonce_keys: Some(vec![U256::from(1), U256::from(2)]),
         sender: Address::repeat_byte(1),
         frames: vec![Frame::default()],
-        fees: TransactionFees {
-            max_fee_per_gas: U256::from(100),
-            max_priority_fee_per_gas: U256::from(1),
-            max_fee_per_blob_gas: U256::ZERO,
-        },
+        fees: TransactionFees { max_fee: U256::from(100), max_priority_fee_per_gas: U256::from(1) },
         ..Default::default()
     }
 }
@@ -102,14 +98,14 @@ fn frame_only_properties_are_fallible_not_panicking() {
 #[test]
 fn fee_edits_override_converted_values() {
     let mut request: TransactionRequest = frame_tx().into();
-    request.max_fee_per_gas = Some(200);
-    assert_eq!(request.build_8141().unwrap().fees.max_fee_per_gas, U256::from(200));
+    request.max_fee = Some(U256::from(200));
+    assert_eq!(request.build_8141().unwrap().fees.max_fee, U256::from(200));
 }
 
 #[test]
 fn wide_fees_survive_json_and_rpc_wrappers() {
     let mut tx = frame_tx();
-    tx.fees.max_fee_per_gas = U256::from(1) << 128;
+    tx.fees.max_fee = U256::from(1) << 128;
     let request: TransactionRequest = tx.clone().into();
     assert!(request.max_fee_per_gas.is_none());
     let decoded: TransactionRequest =
@@ -121,10 +117,10 @@ fn wide_fees_survive_json_and_rpc_wrappers() {
         inner: Recovered::new_unchecked(tx.clone(), tx.sender),
         ..Default::default()
     };
-    assert_eq!(rpc.max_fee_per_gas_u256(), tx.fees.max_fee_per_gas);
+    assert_eq!(rpc.max_fee_per_gas_u256(), tx.fees.max_fee / U256::from(tx.gas_limit()));
     let mut edited = request;
-    edited.max_fee_per_gas = Some(200);
-    assert_eq!(edited.build_8141().unwrap().fees.max_fee_per_gas, U256::from(200));
+    edited.max_fee = Some(U256::from(200));
+    assert_eq!(edited.build_8141().unwrap().fees.max_fee, U256::from(200));
 }
 
 #[test]
@@ -189,7 +185,7 @@ fn any_network_preserves_unknown_conventional_receipts() {
 fn pooled_frame_blobs_require_sidecars() {
     let mut tx = frame_tx();
     tx.blob_versioned_hashes = vec![B256::repeat_byte(1)];
-    tx.fees.max_fee_per_blob_gas = U256::from(1);
+    tx.fees.max_fee = U256::from(1);
     assert!(PooledTransaction::try_from(tx.clone()).is_err());
     assert!(PooledTransaction::decode_2718_exact(&tx.encoded_2718()).is_err());
     let canonical: alloy_consensus::EthereumTxEnvelope<alloy_consensus::TxEip4844> =
@@ -210,7 +206,6 @@ fn provider_build_path_retains_frame_sidecar() {
     };
     let expected_hashes: Vec<_> = sidecar.versioned_hashes().collect();
     let mut request: TransactionRequest = frame_tx().into();
-    request.max_fee_per_blob_gas = Some(1);
     request.blob_versioned_hashes = None;
     request.sidecar = Some(sidecar.clone().into());
     assert!(request.clone().build_typed_tx().is_err());
@@ -257,7 +252,6 @@ fn mismatched_sidecar_hashes_return_the_original_request() {
         }
         .into(),
     );
-    request.max_fee_per_blob_gas = Some(1);
     request.blob_versioned_hashes = Some(vec![B256::repeat_byte(1)]);
     let original = request.clone();
     assert_eq!(request.build_8141_with_sidecar().unwrap_err().into_value(), original);

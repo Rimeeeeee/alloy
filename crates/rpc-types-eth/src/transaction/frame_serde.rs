@@ -103,10 +103,10 @@ mod tests {
     fn unsigned_frame_fill_preserves_placeholders_without_weakening_signed_validation() {
         let request: TransactionRequest = serde_json::from_value(json!({
             "type": "0x6", "from": Address::repeat_byte(0x11), "chainId": "0x1", "nonce": "0x0",
-            "nonceKeys": ["0x0"], "nonceSeq": "0x0",
+            "nonceKeys": [],
             "frames": [{"mode":"0x1", "executionGas":"0x123", "stateGas":"0x45"}],
             "signatures": [{"scheme":"0x1"}],
-            "maxFeePerGas": "0x1", "maxPriorityFeePerGas": "0x0", "maxFeePerBlobGas": "0x0",
+            "maxFee": "0x1", "maxPriorityFeePerGas": "0x0",
             "blobVersionedHashes": []
         }))
         .unwrap();
