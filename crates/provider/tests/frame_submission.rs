@@ -103,6 +103,8 @@ async fn frame_submission_keeps_sidecar_and_full_width_fees() {
     let provider = ProviderBuilder::new().wallet(wallet).connect_client(client);
     let mut request: TransactionRequest = tx.clone().into();
     request.sidecar = Some(sidecar.into());
+    let envelope = provider.fill_and_sign_transaction(request.clone()).await.unwrap();
+    assert_eq!(envelope.frame_transaction(), Some(&tx));
     let pending = provider.send_transaction(request).await.unwrap();
     assert_eq!(pending.tx_hash(), &tx.tx_hash());
 }
