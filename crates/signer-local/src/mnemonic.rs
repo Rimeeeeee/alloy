@@ -6,21 +6,23 @@
 use crate::{LocalSigner, LocalSignerError, PrivateKeySigner};
 use alloy_signer::utils::secret_key_to_address;
 use coins_bip32::{path::DerivationPath, prelude::Parent, xkeys::XPriv};
-use coins_bip39::{English, Mnemonic, Wordlist};
+use coins_bip39::{English, Entropy, Mnemonic, MnemonicError, WordCount, Wordlist};
 use k256::ecdsa::SigningKey;
 use rand::Rng;
-use std::{marker::PhantomData, path::PathBuf};
+use std::{
+    marker::PhantomData,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 use thiserror::Error;
 
-#[cfg(feature = "zeroize")]
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const DEFAULT_DERIVATION_PATH_PREFIX: &str = "m/44'/60'/0'/0/";
 const DEFAULT_DERIVATION_PATH: &str = "m/44'/60'/0'/0/0";
 
 /// Represents a structure that can resolve into a `PrivateKeySigner`.
-#[cfg_attr(feature = "zeroize", derive(Zeroize, ZeroizeOnDrop))]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Zeroize, ZeroizeOnDrop)]
 #[must_use = "builders do nothing unless `build` is called"]
 pub struct MnemonicBuilder<W: Wordlist = English> {
     /// The mnemonic phrase can be supplied to the builder as a string. A builder that has a valid
@@ -31,13 +33,13 @@ pub struct MnemonicBuilder<W: Wordlist = English> {
     word_count: usize,
     /// The derivation path at which the extended private key child will be derived at. By default
     /// the mnemonic builder uses the path: "m/44'/60'/0'/0/0".
-    #[cfg_attr(feature = "zeroize", zeroize(skip))]
+    #[zeroize(skip)]
     derivation_path: DerivationPath,
     /// Optional password for the mnemonic phrase.
     password: Option<String>,
     /// Optional field that if enabled, writes the mnemonic phrase to disk storage at the provided
     /// path.
-    #[cfg_attr(feature = "zeroize", zeroize(skip))]
+    #[zeroize(skip)]
     write_to: Option<PathBuf>,
     /// PhantomData
     _wordlist: PhantomData<W>,
@@ -147,11 +149,15 @@ impl<W: Wordlist> MnemonicBuilder<W> {
 
     /// Sets the derivation path of the child key to be derived. The derivation path is calculated
     /// using the default derivation path prefix used in Ethereum, i.e. "m/44'/60'/0'/0/{index}".
+    ///
+    /// An `index` at or above the BIP-32 harden bit (`0x8000_0000`) is rejected.
     pub fn index(self, index: u32) -> Result<Self, LocalSignerError> {
         self.derivation_path(format!("{DEFAULT_DERIVATION_PATH_PREFIX}{index}"))
     }
 
     /// Sets the derivation path of the child key to be derived.
+    ///
+    /// Path components at or above the BIP-32 harden bit (`0x8000_0000`) are rejected.
     pub fn derivation_path<T: AsRef<str>>(mut self, path: T) -> Result<Self, LocalSignerError> {
         self.derivation_path = path.as_ref().parse()?;
         Ok(self)
@@ -189,11 +195,7 @@ impl<W: Wordlist> MnemonicBuilder<W> {
     /// Builds a `PrivateKeySigner` using the parameters set in mnemonic builder. This method
     /// expects the phrase field to be set.
     pub fn build(&self) -> Result<PrivateKeySigner, LocalSignerError> {
-        let mnemonic = match &self.phrase {
-            Some(phrase) => Mnemonic::<W>::new_from_phrase(phrase)?,
-            None => return Err(MnemonicBuilderError::ExpectedPhraseNotFound.into()),
-        };
-        self.mnemonic_to_signer(&mnemonic)
+        self.mnemonic_to_signer(&self.phrase_mnemonic()?)
     }
 
     /// Builds a `PrivateKeySigner` using the parameters set in the mnemonic builder and
@@ -209,7 +211,7 @@ impl<W: Wordlist> MnemonicBuilder<W> {
         rng: &mut R,
     ) -> Result<PrivateKeySigner, LocalSignerError> {
         let mnemonic = match &self.phrase {
-            None => Mnemonic::<W>::new_with_count(rng, self.word_count)?,
+            None => mnemonic_from_rng(rng, self.word_count)?,
             _ => return Err(MnemonicBuilderError::UnexpectedPhraseFound.into()),
         };
         let signer = self.mnemonic_to_signer(&mnemonic)?;
@@ -233,10 +235,7 @@ impl<W: Wordlist> MnemonicBuilder<W> {
     /// The returned key can then derive individual children, extract a signer, or be used as an
     /// iterator.
     pub fn build_parent_key(&self) -> Result<MnemonicKey, LocalSignerError> {
-        let mnemonic = match &self.phrase {
-            Some(phrase) => Mnemonic::<W>::new_from_phrase(phrase)?,
-            None => return Err(MnemonicBuilderError::ExpectedPhraseNotFound.into()),
-        };
+        let mnemonic = self.phrase_mnemonic()?;
 
         let mut key = mnemonic.master_key(self.password.as_deref())?;
         if self.derivation_path.len() > 1 {
@@ -251,11 +250,15 @@ impl<W: Wordlist> MnemonicBuilder<W> {
     /// Builds a [`MnemonicKey`] by deriving the full configured derivation path from the
     /// mnemonic phrase.
     pub fn build_key(&self) -> Result<MnemonicKey, LocalSignerError> {
-        let mnemonic = match &self.phrase {
-            Some(phrase) => Mnemonic::<W>::new_from_phrase(phrase)?,
-            None => return Err(MnemonicBuilderError::ExpectedPhraseNotFound.into()),
-        };
-        self.mnemonic_to_key(&mnemonic)
+        self.mnemonic_to_key(&self.phrase_mnemonic()?)
+    }
+
+    /// Parses the configured phrase, failing if none is set.
+    fn phrase_mnemonic(&self) -> Result<Mnemonic<W>, LocalSignerError> {
+        match &self.phrase {
+            Some(phrase) => Ok(Mnemonic::<W>::new_from_phrase(phrase)?),
+            None => Err(MnemonicBuilderError::ExpectedPhraseNotFound.into()),
+        }
     }
 
     fn mnemonic_to_signer(
@@ -276,13 +279,10 @@ impl<W: Wordlist> IntoIterator for MnemonicBuilder<W> {
     type IntoIter = MnemonicSignerIter;
 
     fn into_iter(self) -> Self::IntoIter {
-        if self.phrase.is_none() {
-            return MnemonicSignerIter::missing_phrase();
+        match self.build_parent_key() {
+            Ok(key) => key.children_from(self.derivation_path.last().copied().unwrap_or(0)),
+            Err(error) => MnemonicSignerIter::failed(error),
         }
-
-        self.build_parent_key()
-            .expect("mnemonic phrase must be set for iteration")
-            .children_from(self.derivation_path.last().copied().unwrap_or(0))
     }
 }
 
@@ -341,12 +341,16 @@ pub struct MnemonicSignerIter {
 #[derive(Debug, Clone)]
 enum MnemonicSignerIterState {
     Signers { key: MnemonicKey, current_index: u32 },
-    MissingPhrase { yielded_error: bool },
+    Failed { error: Arc<Mutex<Option<LocalSignerError>>> },
 }
 
 impl MnemonicSignerIter {
-    const fn missing_phrase() -> Self {
-        Self { state: MnemonicSignerIterState::MissingPhrase { yielded_error: false } }
+    /// Yields `error` once, then ends.
+    ///
+    /// [`LocalSignerError`] is not `Clone`, so clones of the iterator share the error and only the
+    /// first one polled yields it.
+    fn failed(error: LocalSignerError) -> Self {
+        Self { state: MnemonicSignerIterState::Failed { error: Arc::new(Mutex::new(Some(error))) } }
     }
 }
 
@@ -360,13 +364,8 @@ impl Iterator for MnemonicSignerIter {
                 *current_index += 1;
                 Some(result)
             }
-            MnemonicSignerIterState::MissingPhrase { yielded_error } => {
-                if *yielded_error {
-                    None
-                } else {
-                    *yielded_error = true;
-                    Some(Err(MnemonicBuilderError::ExpectedPhraseNotFound.into()))
-                }
+            MnemonicSignerIterState::Failed { error } => {
+                error.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take().map(Err)
             }
         }
     }
@@ -383,9 +382,28 @@ pub enum MnemonicBuilderError {
     UnexpectedPhraseFound,
 }
 
+/// Generates a mnemonic with `count` words from `rng`.
+///
+/// `coins-bip39` takes a different major version of `rand`, so entropy is drawn here and handed
+/// over as bytes.
+fn mnemonic_from_rng<W: Wordlist, R: Rng>(
+    rng: &mut R,
+    count: usize,
+) -> Result<Mnemonic<W>, MnemonicError> {
+    let len = WordCount::try_from(count)?.entropy_bytes();
+    let mut buf = zeroize::Zeroizing::new([0u8; 32]);
+    rng.fill_bytes(&mut buf[..len]);
+    Ok(Mnemonic::new_from_entropy(Entropy::from_slice(&buf[..len])?))
+}
+
 fn xpriv_to_signer(xpriv: &XPriv) -> PrivateKeySigner {
-    let credential: &coins_bip32::prelude::SigningKey = xpriv.as_ref();
-    let credential = credential.clone();
+    // `coins-bip32` uses a different major version of `k256`, so the key is moved across by its
+    // secret scalar bytes.
+    let xkey: &coins_bip32::prelude::SigningKey = xpriv.as_ref();
+    let mut bytes = zeroize::Zeroizing::new([0u8; 32]);
+    bytes.copy_from_slice(&xkey.to_bytes());
+    let credential =
+        SigningKey::from_slice(bytes.as_slice()).expect("bip32 keys are valid secp256k1 scalars");
     let address = secret_key_to_address(&credential);
     LocalSigner::<SigningKey> { credential, address, chain_id: None }
 }
@@ -393,6 +411,8 @@ fn xpriv_to_signer(xpriv: &XPriv) -> PrivateKeySigner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::address;
+    use coins_bip32::{Bip32Error, BIP32_HARDEN};
     use coins_bip39::English;
     use tempfile::tempdir;
 
@@ -553,5 +573,57 @@ mod tests {
             LocalSignerError::MnemonicBuilderError(MnemonicBuilderError::ExpectedPhraseNotFound)
         ));
         assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn mnemonic_iterator_with_invalid_phrase_returns_error() {
+        // Valid words, but the checksum does not match.
+        let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon \
+                      abandon abandon abandon";
+        let mut iter = MnemonicBuilder::<English>::default().phrase(phrase).into_iter();
+        let err = iter.next().unwrap().unwrap_err();
+
+        assert!(matches!(err, LocalSignerError::Bip39Error(_)));
+        assert!(iter.next().is_none());
+    }
+
+    /// The BIP-32 harden bit overflow that silently derived the wrong key.
+    ///
+    /// `coins-bip32` 0.12 hardened with an unchecked `index + 0x8000_0000`, so in release builds
+    /// `m/44'/60'/0'/0/2147483648'` wrapped to the *unhardened* child `0` and handed back anvil
+    /// account 0 below, with no error. A bare `2147483648` wrapped the other way, silently
+    /// becoming `0'`. `coins-bip32` now rejects these; this guards against regressions.
+    #[test]
+    fn mnemonic_rejects_harden_bit_overflow() {
+        const ANVIL: &str = "test test test test test test test test test test test junk";
+
+        let build = |path: &str| {
+            MnemonicBuilder::<English>::default().phrase(ANVIL).derivation_path(path)?.build()
+        };
+
+        // The key the overflowing paths used to silently resolve to.
+        let account_0 = build("m/44'/60'/0'/0/0").unwrap();
+        assert_eq!(account_0.address(), address!("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"));
+
+        for path in [
+            "m/44'/60'/0'/0/2147483648'",
+            "m/44'/60'/0'/0/2147483648",
+            "m/2147483648h",
+            &format!("m/{}", u32::MAX),
+        ] {
+            let err = build(path).unwrap_err();
+            assert!(
+                matches!(err, LocalSignerError::Bip32Error(Bip32Error::MalformattedDerivation(_))),
+                "{path} should be rejected as harden-bit overflow, got {err:?}"
+            );
+        }
+
+        // `index` builds the path itself, so it inherits the same guard.
+        assert!(MnemonicBuilder::<English>::english().index(BIP32_HARDEN).is_err());
+
+        // The boundary must stay usable: the largest valid hardened index still derives, and
+        // gives a key distinct from account 0 rather than collapsing onto it.
+        let max_hardened = build("m/44'/60'/0'/0/2147483647'").unwrap();
+        assert_ne!(max_hardened.address(), account_0.address());
     }
 }

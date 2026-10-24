@@ -1554,7 +1554,7 @@ impl TxEip8141Ref<'_> {
             )
     }
     /// Prices each nonce key's cold storage read and write under EIP-8250.
-    pub fn keyed_nonce_access_gas(&self) -> u64 {
+    pub const fn keyed_nonce_access_gas(&self) -> u64 {
         match self.nonce_keys {
             None => 0,
             Some(keys) => (keys.len() as u64).saturating_mul(KEYED_NONCE_ACCESS_COST),
@@ -1729,15 +1729,9 @@ impl Encodable for TxEip8141 {
 
 impl Decodable for TxEip8141 {
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        let header = Header::decode(buf)?;
-        if !header.list {
-            return Err(alloy_rlp::Error::UnexpectedString);
-        }
-
-        let remaining = buf.len();
-        let this = Self::rlp_decode_fields(buf)?;
-
-        if buf.len() + header.payload_length != remaining {
+        let mut fields = Header::decode_bytes(buf, true)?;
+        let this = Self::rlp_decode_fields(&mut fields)?;
+        if !fields.is_empty() {
             return Err(alloy_rlp::Error::UnexpectedLength);
         }
 

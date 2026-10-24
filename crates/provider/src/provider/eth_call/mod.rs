@@ -8,7 +8,7 @@ use alloy_rpc_types_eth::{
     BlockOverrides,
 };
 use alloy_sol_types::SolCall;
-use alloy_transport::TransportResult;
+use alloy_transport::{TransportError, TransportResult};
 use futures::FutureExt;
 use std::{
     future::{Future, IntoFuture},
@@ -219,6 +219,15 @@ where
     ) -> Self {
         Self::new(caller, "eth_estimateGas", data)
     }
+
+    /// Creates a call that returns a preparation error without sending a request.
+    pub(crate) fn error(error: TransportError) -> Self {
+        Self::new(
+            caller::ErrorCaller(alloy_transport::SharedTransportError::new(error)),
+            "eth_call",
+            Default::default(),
+        )
+    }
 }
 
 impl<N, Resp, Output, Map> EthCall<N, Resp, Output, Map>
@@ -332,6 +341,12 @@ where
     /// Set the block to use for this call.
     pub const fn block(mut self, block: BlockId) -> Self {
         self.params.block = Some(block);
+        self
+    }
+
+    /// Set the block to use for this call, if any.
+    pub const fn block_opt(mut self, block: Option<BlockId>) -> Self {
+        self.params.block = block;
         self
     }
 
