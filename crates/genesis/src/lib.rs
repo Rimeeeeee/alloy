@@ -433,6 +433,11 @@ pub struct ChainConfig {
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_u64_opt")]
     pub bogota_time: Option<u64>,
 
+    /// Per-chain accounts whose nonce is set to one at the Bogota fork (EIP-8253).
+    /// Public test networks use an empty list; custom chains must derive their own list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eip8253_accounts: Option<Vec<Address>>,
+
     /// BPO1 switch time (None = no fork, 0 = already on BPO1).
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_u64_opt")]
     pub bpo1_time: Option<u64>,
@@ -569,6 +574,8 @@ pub mod serde_bincode_compat {
         #[serde(default)]
         bogota_time: Option<u64>,
         #[serde(default)]
+        eip8253_accounts: Option<Vec<Address>>,
+        #[serde(default)]
         bpo1_time: Option<u64>,
         #[serde(default)]
         bpo2_time: Option<u64>,
@@ -623,6 +630,7 @@ pub mod serde_bincode_compat {
                 osaka_time: value.osaka_time,
                 amsterdam_time: value.amsterdam_time,
                 bogota_time: value.bogota_time,
+                eip8253_accounts: value.eip8253_accounts.clone(),
                 bpo1_time: value.bpo1_time,
                 bpo2_time: value.bpo2_time,
                 bpo3_time: value.bpo3_time,
@@ -672,6 +680,7 @@ pub mod serde_bincode_compat {
                 amsterdam_time: value.amsterdam_time,
                 bogota_time: value.bogota_time,
                 bpo1_time: value.bpo1_time,
+                eip8253_accounts: value.eip8253_accounts,
                 bpo2_time: value.bpo2_time,
                 bpo3_time: value.bpo3_time,
                 bpo4_time: value.bpo4_time,
@@ -720,6 +729,7 @@ pub mod serde_bincode_compat {
 
         use super::super::ChainConfig;
         use alloy_eips::eip7840::BlobParams;
+        use alloy_primitives::Address;
         use bincode::config;
         use serde::{Deserialize, Serialize};
         use serde_with::serde_as;
@@ -732,6 +742,25 @@ pub mod serde_bincode_compat {
                 config: ChainConfig,
             }
 
+            let data = Data { config };
+            let encoded = bincode::serde::encode_to_vec(&data, config::legacy()).unwrap();
+            let (decoded, _) =
+                bincode::serde::decode_from_slice::<Data, _>(&encoded, config::legacy()).unwrap();
+            assert_eq!(decoded, data);
+        }
+
+        #[test]
+        fn test_bogota_time_json_roundtrip() {
+            let config: ChainConfig =
+                serde_json::from_str(r#"{"chainId":1,"bogotaTime":42}"#).unwrap();
+            assert_eq!(config.bogota_time, Some(42));
+
+            let encoded = serde_json::to_value(config).unwrap();
+            assert_eq!(encoded["bogotaTime"], 42);
+        }
+
+        #[test]
+        fn test_chain_config_serde_bincode_compat() {
             let mut blob_schedule = BTreeMap::new();
             blob_schedule.insert(
                 "cancun".to_string(),
@@ -781,6 +810,7 @@ pub mod serde_bincode_compat {
                 osaka_time: None,
                 amsterdam_time: None,
                 bogota_time: Some(700),
+                eip8253_accounts: Some(vec![Address::repeat_byte(1), Address::repeat_byte(2)]),
                 bpo1_time: None,
                 bpo2_time: None,
                 bpo3_time: None,
@@ -797,38 +827,11 @@ pub mod serde_bincode_compat {
                 _non_exhaustive: (),
             };
 
-            let data = Data { config };
-            let encoded = bincode::serde::encode_to_vec(&data, config::legacy()).unwrap();
-            let (decoded, _) =
-                bincode::serde::decode_from_slice::<Data, _>(&encoded, config::legacy()).unwrap();
-            assert_eq!(decoded, data);
+            assert_bincode_roundtrip(config);
         }
 
         #[test]
-        fn test_bogota_time_json_roundtrip() {
-            let config: ChainConfig =
-                serde_json::from_str(r#"{"chainId":1,"bogotaTime":42}"#).unwrap();
-            assert_eq!(config.bogota_time, Some(42));
-
-            let encoded = serde_json::to_value(config).unwrap();
-            assert_eq!(encoded["bogotaTime"], 42);
-        }
-
-        #[test]
-        fn test_chain_config_serde_bincode_compat() {
-            use serde_with::serde_as;
-
-            assert_bincode_roundtrip(ChainConfig {
-                dao_fork_block: Some(100),
-                eip155_block: Some(200),
-                byzantium_block: Some(300),
-                blob_schedule,
-                ..Default::default()
-            });
-        }
-
-        #[test]
-        fn test_chain_config_serde_bincode_compat() {
+        fn test_chain_config_extra_fields_serde_bincode_compat() {
             let mut config = ChainConfig {
                 dao_fork_block: Some(100),
                 eip155_block: Some(200),
@@ -1054,6 +1057,7 @@ impl Default for ChainConfig {
             osaka_time: None,
             amsterdam_time: None,
             bogota_time: None,
+            eip8253_accounts: None,
             bpo1_time: None,
             bpo2_time: None,
             bpo3_time: None,

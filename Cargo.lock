@@ -269,8 +269,7 @@ dependencies = [
 [[package]]
 name = "alloy-eip7928"
 version = "0.4.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a12e1dc70236cfb8e79b96dd8544aed47c39e2f45dc6b51c3703e969e052faa"
+source = "git+https://github.com/Rimeeeeee/eips?branch=bogota-devnet-2#9d9691907176f76e935277ae363c33ee0a4e5e8a"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
@@ -284,7 +283,7 @@ dependencies = [
 [[package]]
 name = "alloy-eip8141"
 version = "0.1.1"
-source = "git+https://github.com/Rimeeeeee/eips?branch=bogota-devnet-2#f80a7247b474857622911df68e05dea2c0fa61ae"
+source = "git+https://github.com/Rimeeeeee/eips?branch=bogota-devnet-2#9d9691907176f76e935277ae363c33ee0a4e5e8a"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
@@ -4939,7 +4938,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7094,7 +7093,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.59.0",
