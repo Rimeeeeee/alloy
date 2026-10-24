@@ -7,7 +7,6 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-homepage.workspace = true
 repository.workspace = true
 exclude.workspace = true
 
@@ -32,6 +31,7 @@ alloy-eip8141.workspace = true
 
 alloy-primitives = { workspace = true, features = ["rlp"] }
 alloy-rlp = { workspace = true, features = ["derive"] }
+alloy-sol-types = { workspace = true, optional = true }
 either.workspace = true
 
 # serde
@@ -73,13 +73,13 @@ alloy-primitives = { workspace = true, features = [
 ] }
 arbitrary = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-rand.workspace = true
 
 [features]
 default = ["std", "kzg-sidecar"]
 std = [
 	"alloy-primitives/std",
 	"alloy-rlp/std",
+	"alloy-sol-types?/std",
 	"serde?/std",
 	"c-kzg?/std",
 	"alloy-serde?/std",
@@ -106,8 +106,9 @@ serde = [
 	"alloy-eip7928/serde",
 	"alloy-eip2124/serde",
 	"either/serde",
-	"rand/serde",
 ]
+# Solidity event types and deposit log encoding.
+sol-types = ["dep:alloy-sol-types"]
 serde-bincode-compat = ["alloy-eip7702/serde-bincode-compat"]
 kzg = ["kzg-sidecar", "sha2", "dep:c-kzg"]
 kzg-sidecar = ["sha2"]
@@ -123,6 +124,7 @@ arbitrary = [
 	"dep:arbitrary",
 	"alloy-primitives/arbitrary",
 	"alloy-serde?/arbitrary",
+	"alloy-sol-types?/arbitrary",
 	"alloy-eip2124/arbitrary",
 	"alloy-eip2930/arbitrary",
 	"alloy-eip7702/arbitrary",

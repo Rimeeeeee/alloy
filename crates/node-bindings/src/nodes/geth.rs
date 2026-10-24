@@ -1,7 +1,7 @@
 //! Utilities for launching a Geth dev-mode instance.
 
 use crate::{
-    utils::{extract_endpoint, extract_value, unused_port, GracefulShutdown},
+    utils::{extract_endpoint, extract_value, unused_port, GracefulShutdown, StartupGuard},
     NodeError, NODE_DIAL_LOOP_TIMEOUT, NODE_STARTUP_TIMEOUT,
 };
 use alloy_genesis::{CliqueConfig, Genesis};
@@ -13,7 +13,7 @@ use std::{
     io::{BufRead, BufReader},
     path::PathBuf,
     process::{Child, ChildStderr, Command, Stdio},
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tempfile::tempdir;
 use url::Url;
@@ -155,15 +155,23 @@ impl GethInstance {
     ///
     /// Requires [`Geth::keep_stderr`] to have been set and [`Self::stderr`] not to have taken the
     /// handle.
+    ///
+    /// Returns [`NodeError::Fatal`] if geth closes stderr, i.e. exits, before the peer is added.
     pub fn wait_to_add_peer(&mut self, id: &str) -> Result<(), NodeError> {
         let mut stderr = self.pid.stderr.as_mut().ok_or(NodeError::NoStderr)?;
         let mut err_reader = BufReader::new(&mut stderr);
         let mut line = String::new();
         let start = Instant::now();
 
-        while start.elapsed() < NODE_DIAL_LOOP_TIMEOUT {
+        loop {
+            if start.elapsed() >= NODE_DIAL_LOOP_TIMEOUT {
+                return Err(NodeError::Timeout);
+            }
+
             line.clear();
-            err_reader.read_line(&mut line).map_err(NodeError::ReadLineError)?;
+            if err_reader.read_line(&mut line).map_err(NodeError::ReadLineError)? == 0 {
+                break;
+            }
 
             // geth ids are truncated
             let truncated_id = if id.len() > 16 { &id[..16] } else { id };
@@ -171,7 +179,14 @@ impl GethInstance {
                 return Ok(());
             }
         }
-        Err(NodeError::Timeout)
+
+        // stderr hit EOF, so geth is gone and the peer can never be added. Report it right away
+        // instead of spinning on `read_line` until the deadline.
+        let detail = match self.pid.try_wait().map_err(NodeError::WaitError)? {
+            Some(status) => format!("geth exited with {status}"),
+            None => "geth closed its stderr".to_string(),
+        };
+        Err(NodeError::Fatal(format!("{detail} before adding the peer")))
     }
 }
 
@@ -214,6 +229,7 @@ pub struct Geth {
     chain_id: Option<u64>,
     insecure_unlock: bool,
     keep_err: bool,
+    timeout: Option<u64>,
     genesis: Option<Genesis>,
     mode: NodeMode,
     clique_private_key: Option<SigningKey>,
@@ -390,6 +406,15 @@ impl Geth {
         self
     }
 
+    /// Sets the startup timeout in milliseconds.
+    ///
+    /// Defaults to [`NODE_STARTUP_TIMEOUT`]. The deadline is checked between complete stderr
+    /// lines, so a live process that emits no newline can block past the deadline.
+    pub const fn timeout(mut self, timeout: u64) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
     /// Keep the handle to geth's stderr in order to read from it.
     ///
     /// This is required by [`GethInstance::stderr`] and [`GethInstance::wait_to_add_peer`].
@@ -451,7 +476,8 @@ impl Geth {
     /// to report ready.
     ///
     /// Returns an error if the process cannot be started, reports a fatal startup error, or does
-    /// not become ready before [`NODE_STARTUP_TIMEOUT`] is observed. The deadline is checked
+    /// not become ready before the configured [`Self::timeout`] (defaulting to
+    /// [`NODE_STARTUP_TIMEOUT`]) is observed. The deadline is checked
     /// between complete stderr lines; a live process that emits no newline can block this call
     /// past the deadline.
     pub fn try_spawn(mut self) -> Result<GethInstance, NodeError> {
@@ -572,7 +598,6 @@ impl Geth {
                 .map_err(NodeError::SpawnError)?
                 .wait()
                 .map_err(NodeError::WaitError)?;
-            // .expect("failed to wait for geth init to exit");
             if !res.success() {
                 return Err(NodeError::InitError);
             }
@@ -624,10 +649,11 @@ impl Geth {
 
         cmd.args(self.args);
 
-        let mut child = cmd.spawn().map_err(NodeError::SpawnError)?;
+        let mut child = StartupGuard::new(cmd.spawn().map_err(NodeError::SpawnError)?);
 
         let stderr = child.stderr.take().ok_or(NodeError::NoStderr)?;
 
+        let timeout = self.timeout.map(Duration::from_millis).unwrap_or(NODE_STARTUP_TIMEOUT);
         let start = Instant::now();
         let mut reader = BufReader::new(stderr);
 
@@ -637,13 +663,19 @@ impl Geth {
         let mut ports_started = false;
 
         loop {
-            if start + NODE_STARTUP_TIMEOUT <= Instant::now() {
+            if start.elapsed() >= timeout {
                 let _ = child.kill();
                 return Err(NodeError::Timeout);
             }
 
             let mut line = String::with_capacity(120);
-            reader.read_line(&mut line).map_err(NodeError::ReadLineError)?;
+            if reader.read_line(&mut line).map_err(NodeError::ReadLineError)? == 0 {
+                let _ = child.kill();
+                let status = child.wait().map_err(NodeError::WaitError)?;
+                return Err(NodeError::Fatal(format!(
+                    "geth exited before it was ready ({status})"
+                )));
+            }
 
             if matches!(self.mode, NodeMode::NonDev(_)) && line.contains("Started P2P networking") {
                 p2p_started = true;
@@ -705,13 +737,13 @@ impl Geth {
         }
 
         Ok(GethInstance {
-            pid: child,
+            pid: child.into_child(),
             host: self.host.unwrap_or_else(|| "localhost".to_string()),
             port,
             ipc: self.ipc_path,
             data_dir: self.data_dir,
             p2p_port,
-            auth_port: self.authrpc_port,
+            auth_port: Some(authrpc_port),
             genesis: self.genesis,
             clique_private_key: self.clique_private_key,
         })
@@ -721,6 +753,27 @@ impl Geth {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn respects_startup_timeout() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let program = dir.path().join("geth");
+        // Emit a progress line after the default deadline, before announcing HTTP readiness.
+        std::fs::write(
+            &program,
+            "#!/bin/sh\nsleep 11\necho 'Initializing dev chain' >&2\necho 'HTTP server started endpoint=127.0.0.1:8545 auth=false' >&2\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(matches!(Geth::at(&program).timeout(0).try_spawn(), Err(NodeError::Timeout)));
+        let geth = Geth::at(&program).timeout(30_000).try_spawn().unwrap();
+        assert_eq!(geth.port(), 8545);
+        assert!(geth.p2p_port().is_none());
+    }
 
     #[test]
     fn can_set_host() {
@@ -740,5 +793,76 @@ mod tests {
             assert!(geth.endpoint().starts_with("http://localhost:"));
             assert!(geth.ws_endpoint().starts_with("ws://localhost:"));
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod early_exit_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn early_exit_is_reported() {
+        let dir = tempdir().unwrap();
+        let program = dir.path().join("geth");
+        std::fs::write(&program, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let err = Geth::at(&program).try_spawn().unwrap_err();
+        assert!(matches!(err, NodeError::Fatal(_)), "{err:?}");
+    }
+
+    #[test]
+    fn stderr_eof_is_reported_instead_of_spinning() {
+        let dir = tempdir().unwrap();
+        let program = dir.path().join("geth");
+        // Startup looks healthy, then the process exits without ever adding the peer.
+        std::fs::write(
+            &program,
+            "#!/bin/sh\necho 'HTTP server started endpoint=127.0.0.1:8545 auth=false' >&2\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut geth = Geth::at(&program).keep_stderr().try_spawn().unwrap();
+
+        let start = Instant::now();
+        let err = geth.wait_to_add_peer("enode://deadbeef@127.0.0.1:30303").unwrap_err();
+        let elapsed = start.elapsed();
+
+        assert!(matches!(err, NodeError::Fatal(_)), "{err:?}");
+        assert!(elapsed < NODE_DIAL_LOOP_TIMEOUT, "spun until the deadline: {elapsed:?}");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod auth_port_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn auto_selected_auth_port_is_reported() {
+        let dir = tempdir().unwrap();
+        let program = dir.path().join("geth");
+        let args = dir.path().join("args");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\necho \"$@\" > '{}'\necho 'HTTP server started endpoint=127.0.0.1:8545 auth=false' >&2\n",
+                args.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let geth = Geth::at(&program).try_spawn().unwrap();
+        let args = std::fs::read_to_string(args).unwrap();
+        let passed = args
+            .split_whitespace()
+            .skip_while(|arg| *arg != "--authrpc.port")
+            .nth(1)
+            .and_then(|port| port.parse::<u16>().ok());
+        assert!(passed.is_some(), "no --authrpc.port in {args:?}");
+        assert_eq!(geth.auth_port(), passed);
     }
 }

@@ -100,7 +100,8 @@ fn measure(kind: &str, size: usize, json: &str, decode: Decode, smoke: bool) {
     loop {
         black_box(decode.request(black_box(json)));
         iterations += 1;
-        if smoke || (iterations % 32 == 0 && start.elapsed() >= Duration::from_millis(250)) {
+        if smoke || (iterations.is_multiple_of(32) && start.elapsed() >= Duration::from_millis(250))
+        {
             break;
         }
     }
