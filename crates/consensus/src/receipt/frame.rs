@@ -69,6 +69,11 @@ impl<T> FrameReceiptEnvelope<T> {
     pub fn map_logs<U: Clone>(self, f: impl FnMut(T) -> U) -> FrameReceiptEnvelope<U> {
         self.payload.map_logs(f).into()
     }
+
+    /// Sets cumulative gas without changing the frame payloads or cached logs.
+    pub const fn set_cumulative_gas_used(&mut self, cumulative_gas_used: u64) {
+        self.payload.cumulative_gas_used = cumulative_gas_used;
+    }
 }
 
 impl<T: Clone> From<FrameReceiptPayload<T>> for FrameReceiptEnvelope<T> {
@@ -335,6 +340,24 @@ mod tests {
         assert_eq!(mapped.logs(), [1, 2, 3]);
         assert_eq!(mapped.payload().frame_receipts[0].logs, [1]);
         assert_eq!(mapped.payload().frame_receipts[1].logs, [2, 3]);
+    }
+
+    #[test]
+    fn cumulative_gas_updates_encoding_without_rebuilding_logs() {
+        let mut envelope = FrameReceiptEnvelope::new(payload());
+        let logs = envelope.logs().as_ptr();
+        let original = alloy_rlp::encode(&envelope);
+
+        envelope.set_cumulative_gas_used(65_536);
+
+        assert_eq!(envelope.cumulative_gas_used(), 65_536);
+        assert_eq!(envelope.logs().as_ptr(), logs);
+        assert_eq!(envelope.logs(), [log(1), log(2), log(3)]);
+        assert_eq!(envelope.payload().frame_receipts, payload().frame_receipts);
+        let encoded = alloy_rlp::encode(&envelope);
+        assert_ne!(encoded, original);
+        assert_eq!(encoded, alloy_rlp::encode(envelope.payload()));
+        assert_eq!(FrameReceiptEnvelope::<Log>::decode(&mut encoded.as_slice()).unwrap(), envelope);
     }
 
     #[cfg(feature = "serde")]
