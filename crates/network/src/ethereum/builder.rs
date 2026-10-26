@@ -389,7 +389,7 @@ mod tests {
             TxEnvelope::Eip1559(tx.into_signed(Signature::new(U256::ZERO, U256::ZERO, false)));
         let tx_response = alloy_rpc_types_eth::Transaction {
             inner: Recovered::new_unchecked(envelope, from),
-            effective_gas_price: Some(1000),
+            effective_gas_price: Some(U256::from(1000)),
             block_hash: None,
             block_number: None,
             block_timestamp: None,

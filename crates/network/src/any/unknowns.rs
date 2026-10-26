@@ -464,7 +464,7 @@ mod tests {
 
     /// <https://github.com/alloy-rs/alloy/issues/2842>
     #[test]
-    fn gas_price_saturation() {
+    fn gas_price_metadata_preserves_full_width() {
         let tx_json_with_saturate = serde_json::json!({
             "type": "0x78",
             "nonce": "0x1",
@@ -479,7 +479,16 @@ mod tests {
         let tx: alloy_rpc_types_eth::Transaction<UnknownTypedTransaction> =
             serde_json::from_value(tx_json_with_saturate).unwrap();
         assert!(tx.inner.gas_price().is_none());
-        assert_eq!(tx.effective_gas_price, Some(u128::MAX));
+        assert_eq!(
+            tx.effective_gas_price,
+            Some(
+                U256::from_str_radix(
+                    "30783134626639633464372e3333333333333333333333333333333333333333",
+                    16,
+                )
+                .unwrap()
+            )
+        );
 
         let tx_json_no_saturate = serde_json::json!({
             "type": "0x78",

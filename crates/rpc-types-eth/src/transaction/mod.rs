@@ -64,7 +64,7 @@ pub struct Transaction<T = TxEnvelope> {
     pub transaction_index: Option<u64>,
 
     /// Deprecated effective gas price value.
-    pub effective_gas_price: Option<u128>,
+    pub effective_gas_price: Option<U256>,
 
     /// The Unix block_timestamp (in seconds) when the block containing this transaction was mined.
     ///
@@ -191,9 +191,9 @@ where
         } = tx_info;
         let effective_gas_price = base_fee
             .map(|base_fee| {
-                tx.effective_tip_per_gas(base_fee).unwrap_or_default() + base_fee as u128
+                tx.effective_tip_per_gas_u256(base_fee).unwrap_or_default() + U256::from(base_fee)
             })
-            .unwrap_or_else(|| tx.max_fee_per_gas());
+            .unwrap_or_else(|| tx.max_fee_per_gas_u256());
 
         Self {
             inner: tx,
@@ -521,11 +521,7 @@ mod tx_serde {
     //! This is needed because we might need to deserialize the `gasPrice` field into both
     //! [`crate::Transaction::effective_gas_price`] and [`alloy_consensus::TxLegacy::gas_price`].
     //!
-    //! Additionally, during deserialization this module handles the case where the `gasPrice` field
-    //! is larger than `u128::MAX` by saturating it to `u128::MAX`. This is known to happen on
-    //! some networks.
-    //!
-    //! See <https://github.com/alloy-rs/alloy/issues/2842> for example.
+    //! Derived prices retain their full width; legacy prices remain part of the inner transaction.
 
     use super::*;
     use alloy_primitives::U256;
@@ -618,7 +614,7 @@ mod tx_serde {
             let (inner, from) = inner.into_parts();
 
             let effective_gas_price = if inner.gas_price().is_none() {
-                effective_gas_price.map(U256::from)
+                effective_gas_price
             } else {
                 // If inner transaction has its own `gasPrice` don't serialize it in this struct.
                 None
@@ -651,11 +647,9 @@ mod tx_serde {
                 block_timestamp,
             } = value;
 
-            // Try to get `gasPrice` field from inner envelope or from `MaybeGasPrice` (making
-            // sure to saturate when converting to u128), otherwise return error.
-            let effective_gas_price = inner
-                .gas_price()
-                .or_else(|| gas_price.effective_gas_price.map(|g| g.saturating_to()));
+            // Legacy envelopes carry their own gas price; dynamic prices come from metadata.
+            let effective_gas_price =
+                inner.gas_price().map(U256::from).or(gas_price.effective_gas_price);
 
             Ok(Self {
                 inner: Recovered::new_unchecked(
@@ -675,6 +669,11 @@ mod tx_serde {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "serde")]
+    use alloy_consensus::SignableTransaction;
+    #[cfg(feature = "serde")]
+    use alloy_primitives::Signature;
 
     #[allow(unused)]
     fn assert_convert_into_envelope(tx: Transaction) -> TxEnvelope {
@@ -735,11 +734,47 @@ mod tests {
 
         let blob_tx = serde_json::from_str::<Transaction>(blob_rpc_tx).unwrap();
         assert_eq!(blob_tx.block_number, Some(3));
-        assert_eq!(blob_tx.effective_gas_price, Some(0x281d620e));
+        assert_eq!(blob_tx.effective_gas_price, Some(U256::from(0x281d620e)));
 
         let legacy_tx = serde_json::from_str::<Transaction>(legacy_rpc_tx).unwrap();
         assert_eq!(legacy_tx.block_number, Some(4));
-        assert_eq!(legacy_tx.effective_gas_price, Some(0x23237dee));
+        assert_eq!(legacy_tx.effective_gas_price, Some(U256::from(0x23237dee)));
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn ordinary_response_prices_keep_quantity_json() {
+        let sender = Address::repeat_byte(1);
+        for (transaction, expected) in [
+            (
+                TxEnvelope::Legacy(
+                    TxLegacy { gas_price: 5, ..Default::default() }
+                        .into_signed(Signature::test_signature()),
+                ),
+                "0x5",
+            ),
+            (
+                TxEnvelope::Eip1559(
+                    TxEip1559 {
+                        max_fee_per_gas: 10,
+                        max_priority_fee_per_gas: 2,
+                        ..Default::default()
+                    }
+                    .into_signed(Signature::test_signature()),
+                ),
+                "0x3",
+            ),
+        ] {
+            let rpc = Transaction::from_transaction(
+                Recovered::new_unchecked(transaction, sender),
+                TransactionInfo { base_fee: Some(1), ..Default::default() },
+            );
+            let encoded = serde_json::to_string(&rpc).unwrap();
+            assert_eq!(encoded.matches("\"gasPrice\":").count(), 1);
+            let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(value["gasPrice"], expected);
+            assert_eq!(serde_json::from_value::<Transaction>(value).unwrap(), rpc);
+        }
     }
 
     // <https://github.com/alloy-rs/alloy/issues/1643>

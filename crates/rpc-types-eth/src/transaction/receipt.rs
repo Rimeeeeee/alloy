@@ -1,7 +1,7 @@
 use crate::Log;
 use alloy_consensus::{ReceiptEnvelope, TxReceipt, TxType};
 use alloy_network_primitives::ReceiptResponse;
-use alloy_primitives::{Address, BlockHash, TxHash, B256};
+use alloy_primitives::{Address, BlockHash, TxHash, B256, U256};
 use alloy_sol_types::SolEvent;
 
 /// Transaction receipt
@@ -47,8 +47,7 @@ pub struct TransactionReceipt<T = ReceiptEnvelope<Log>> {
     ///
     /// Deserialization also accepts the legacy `gasPrice` name and defaults to zero if neither
     /// name is present.
-    #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
-    pub effective_gas_price: u128,
+    pub effective_gas_price: U256,
     /// Blob gas used by the EIP-4844 transaction, in blob gas units.
     ///
     /// This is None for non eip-4844 transactions
@@ -106,8 +105,8 @@ where
             // 1. Use effectiveGasPrice if present
             // 2. Fallback to use gasPrice
             // 3. Default to 0 if neither is present
-            #[serde(default, alias = "gasPrice", with = "alloy_serde::quantity::opt")]
-            effective_gas_price: Option<u128>,
+            #[serde(default, alias = "gasPrice")]
+            effective_gas_price: Option<U256>,
             #[serde(default, with = "alloy_serde::quantity::opt")]
             blob_gas_used: Option<u64>,
             #[serde(default, with = "alloy_serde::quantity::opt")]
@@ -125,7 +124,7 @@ where
             block_hash: helper.block_hash,
             block_number: helper.block_number,
             gas_used: helper.gas_used,
-            effective_gas_price: helper.effective_gas_price.unwrap_or(0),
+            effective_gas_price: helper.effective_gas_price.unwrap_or_default(),
             blob_gas_used: helper.blob_gas_used,
             blob_gas_price: helper.blob_gas_price,
             from: helper.from,
@@ -280,7 +279,7 @@ impl<T: TxReceipt<Log = Log>> ReceiptResponse for TransactionReceipt<T> {
         self.gas_used
     }
 
-    fn effective_gas_price(&self) -> u128 {
+    fn effective_gas_price(&self) -> U256 {
         self.effective_gas_price
     }
 
@@ -319,7 +318,11 @@ impl From<TransactionReceipt> for TransactionReceipt<ReceiptEnvelope<alloy_primi
 mod test {
     use super::*;
     use crate::TransactionReceipt;
-    use alloy_consensus::{Eip658Value, Receipt, ReceiptWithBloom};
+    use alloy_consensus::{Eip658Value, Receipt, ReceiptWithBloom, Transaction, TxEip8141};
+    use alloy_eips::eip8141::{
+        Frame, FrameGasUsed, FrameLimits, FrameMode, FrameReceipt, FrameReceiptPayload,
+        TransactionFees,
+    };
     use alloy_primitives::{address, b256, bloom, Bloom};
     use similar_asserts::assert_eq;
 
@@ -419,18 +422,18 @@ mod test {
 
         let receipt: TransactionReceipt = serde_json::from_str(json).unwrap();
 
-        assert_eq!(receipt.effective_gas_price, 0);
+        assert_eq!(receipt.effective_gas_price, U256::ZERO);
 
         let with_gas_price = r#"{"blockHash":"0x0fe66313f8b3f8d88d19ac13b05de0f6e0ef7fcb3293db0869062493ff98f9db","blockNumber":"0x4d34901","contractAddress":null,"cumulativeGasUsed":"0x157e6","from":"0x7ee0d8c9a1374e3d5ce33d48cd09578251af708f","gasUsed":"0x157e6","gasPrice":"0x2e90edd00","logs":[{"address":"0x03396fe4e58a0778679e2731564f064fa5256c6e","topics":["0x4736edcab43476194077e25fadaf13bbfb18c7db442202d616b41fd1d549dc9c","0x0000000000000000000000000000000000000000000000000e3762762ff00800","0x0000000000000000000000000000000000000000000000000000000067179cea"],"data":"0x","blockNumber":"0x4d34901","transactionHash":"0x968c2d0a7b38bfd7f57684298b5b4cda08b591e9f59b60e865a6eb8b531ef837","transactionIndex":"0x0","blockHash":"0x0fe66313f8b3f8d88d19ac13b05de0f6e0ef7fcb3293db0869062493ff98f9db","logIndex":"0x0","removed":false}],"logsBloom":"0x00000400000000000000000000000000000400010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002000000080000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000010000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010000004000000000000000000000000000000000000000000040000000000000000000000000000000000000000010000000000000000000000000000000","status":"0x1","to":"0x03396fe4e58a0778679e2731564f064fa5256c6e","transactionHash":"0x968c2d0a7b38bfd7f57684298b5b4cda08b591e9f59b60e865a6eb8b531ef837","transactionIndex":"0x0","type":"0x0"}"#;
 
         let receipt_with_gas_price: TransactionReceipt =
             serde_json::from_str(with_gas_price).unwrap();
 
-        assert_eq!(receipt_with_gas_price.effective_gas_price, 12500000000);
+        assert_eq!(receipt_with_gas_price.effective_gas_price, U256::from(12500000000u64));
 
         let proper_receipt = r#"{"blockHash":"0x0fe66313f8b3f8d88d19ac13b05de0f6e0ef7fcb3293db0869062493ff98f9db","blockNumber":"0x4d34901","contractAddress":null,"cumulativeGasUsed":"0x157e6","from":"0x7ee0d8c9a1374e3d5ce33d48cd09578251af708f","gasUsed":"0x157e6","effectiveGasPrice":"0x2e90edd00","logs":[{"address":"0x03396fe4e58a0778679e2731564f064fa5256c6e","topics":["0x4736edcab43476194077e25fadaf13bbfb18c7db442202d616b41fd1d549dc9c","0x0000000000000000000000000000000000000000000000000e3762762ff00800","0x0000000000000000000000000000000000000000000000000000000067179cea"],"data":"0x","blockNumber":"0x4d34901","transactionHash":"0x968c2d0a7b38bfd7f57684298b5b4cda08b591e9f59b60e865a6eb8b531ef837","transactionIndex":"0x0","blockHash":"0x0fe66313f8b3f8d88d19ac13b05de0f6e0ef7fcb3293db0869062493ff98f9db","logIndex":"0x0","removed":false}],"logsBloom":"0x00000400000000000000000000000000000400010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002000000080000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000010000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010000004000000000000000000000000000000000000000000040000000000000000000000000000000000000000010000000000000000000000000000000","status":"0x1","to":"0x03396fe4e58a0778679e2731564f064fa5256c6e","transactionHash":"0x968c2d0a7b38bfd7f57684298b5b4cda08b591e9f59b60e865a6eb8b531ef837","transactionIndex":"0x0","type":"0x0"}"#;
         let proper_receipt: TransactionReceipt = serde_json::from_str(proper_receipt).unwrap();
-        assert_eq!(proper_receipt.effective_gas_price, 12500000000);
+        assert_eq!(proper_receipt.effective_gas_price, U256::from(12500000000u64));
     }
 
     #[test]
@@ -443,5 +446,65 @@ mod test {
         assert_eq!(receipt.transaction_type(), TxType::Legacy);
         assert_eq!(receipt.gas_used, 0xc3b68);
         assert!(receipt.status());
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn frame_receipt_preserves_full_width_effective_gas_price() {
+        let priority_fee = U256::from(1) << 200;
+        let transaction = TxEip8141 {
+            nonce_keys: Some(vec![]),
+            frames: vec![Frame {
+                mode: FrameMode::Verify,
+                flags: 3,
+                limits: FrameLimits { execution: 100_000, state: 0 },
+                ..Default::default()
+            }],
+            fees: TransactionFees {
+                max_fee: U256::from(1) << 240,
+                max_priority_fee_per_gas: priority_fee,
+            },
+            ..Default::default()
+        };
+        let price = transaction.effective_gas_price_u256(Some(1));
+        assert_eq!(price, priority_fee + U256::from(1));
+        let mut receipt = TransactionReceipt {
+            inner: ReceiptEnvelope::Eip8141(
+                FrameReceiptPayload {
+                    cumulative_gas_used: 21_000,
+                    payer: Address::repeat_byte(1),
+                    frame_receipts: vec![FrameReceipt {
+                        gas_used: FrameGasUsed { execution: 21_000, state: 0 },
+                        ..Default::default()
+                    }],
+                }
+                .into(),
+            ),
+            transaction_hash: B256::ZERO,
+            transaction_index: Some(0),
+            block_hash: Some(B256::ZERO),
+            block_number: Some(1),
+            gas_used: 21_000,
+            effective_gas_price: price,
+            blob_gas_used: None,
+            blob_gas_price: None,
+            from: Address::repeat_byte(1),
+            to: Some(Address::repeat_byte(1)),
+            contract_address: None,
+        };
+        let mut value = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(value["effectiveGasPrice"], format!("{price:#x}"));
+        assert_eq!(serde_json::from_value::<TransactionReceipt>(value.clone()).unwrap(), receipt);
+        assert_eq!(receipt.effective_gas_price(), price);
+        assert_eq!(receipt.cost(), price * U256::from(receipt.gas_used));
+        assert_eq!(alloy_serde::WithOtherFields::new(receipt.clone()).effective_gas_price(), price);
+        let fields = value.as_object_mut().unwrap();
+        let price = fields.remove("effectiveGasPrice").unwrap();
+        fields.insert("gasPrice".into(), price);
+        assert_eq!(serde_json::from_value::<TransactionReceipt>(value).unwrap(), receipt);
+
+        receipt.effective_gas_price = U256::MAX;
+        receipt.gas_used = u64::MAX;
+        assert_eq!(receipt.cost(), U256::MAX);
     }
 }

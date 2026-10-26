@@ -267,10 +267,10 @@ pub(super) mod signatures {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Transaction, TransactionRequest};
+    use crate::{Transaction, TransactionInfo, TransactionRequest};
     use alloy_consensus::{transaction::Recovered, TxEip8141, TxEnvelope};
-    use alloy_eips::eip8141::{Frame, TransactionFees};
-    use alloy_primitives::{Address, U256};
+    use alloy_eips::eip8141::{Frame, FrameLimits, FrameMode, TransactionFees};
+    use alloy_primitives::{Address, Sealable, U256};
     use serde_json::json;
 
     #[test]
@@ -525,5 +525,36 @@ mod tests {
         assert!(!encoded.contains("\"sender\":"));
         let decoded: Transaction = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, rpc);
+    }
+
+    #[test]
+    fn frame_transaction_response_preserves_full_width_gas_price() {
+        let sender = Address::repeat_byte(0x11);
+        let priority_fee = U256::from(1) << 200;
+        let transaction = TxEip8141 {
+            sender,
+            nonce_keys: Some(vec![]),
+            frames: vec![Frame {
+                mode: FrameMode::Verify,
+                flags: 3,
+                limits: FrameLimits { execution: 100_000, state: 0 },
+                ..Default::default()
+            }],
+            fees: TransactionFees {
+                max_fee: U256::from(1) << 240,
+                max_priority_fee_per_gas: priority_fee,
+            },
+            ..Default::default()
+        };
+        let rpc = Transaction::from_transaction(
+            Recovered::new_unchecked(TxEnvelope::Eip8141(transaction.seal_slow()), sender),
+            TransactionInfo { base_fee: Some(1), ..Default::default() },
+        );
+        let expected = priority_fee + U256::from(1);
+        assert_eq!(rpc.effective_gas_price, Some(expected));
+        let value = serde_json::to_value(&rpc).unwrap();
+        assert_eq!(value["gasPrice"], format!("{expected:#x}"));
+        assert_eq!(value["maxPriorityFeePerGas"], format!("{priority_fee:#x}"));
+        assert_eq!(serde_json::from_value::<Transaction>(value).unwrap(), rpc);
     }
 }

@@ -496,7 +496,7 @@ impl TransactionResponse for AnyRpcTransaction {
     }
 
     fn gas_price(&self) -> Option<u128> {
-        self.inner.effective_gas_price
+        self.inner.effective_gas_price.map(|price| price.saturating_to())
     }
 }
 

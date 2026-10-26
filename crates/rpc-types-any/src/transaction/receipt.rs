@@ -1,6 +1,6 @@
 use alloy_consensus_any::AnyReceiptEnvelope;
 use alloy_network_primitives::ReceiptResponse;
-use alloy_primitives::{Address, BlockHash, TxHash, B256};
+use alloy_primitives::{Address, BlockHash, TxHash, B256, U256};
 use alloy_rpc_types_eth::{Log, TransactionReceipt};
 use alloy_serde::{OtherFields, WithOtherFields};
 use core::ops::{Deref, DerefMut};
@@ -89,7 +89,7 @@ impl AnyTransactionReceipt {
 
     /// Returns the effective gas price.
     #[inline]
-    pub const fn effective_gas_price(&self) -> u128 {
+    pub const fn effective_gas_price(&self) -> U256 {
         self.0.inner.effective_gas_price
     }
 
@@ -243,7 +243,7 @@ impl ReceiptResponse for AnyTransactionReceipt {
         self.0.inner.gas_used
     }
 
-    fn effective_gas_price(&self) -> u128 {
+    fn effective_gas_price(&self) -> U256 {
         self.0.inner.effective_gas_price
     }
 

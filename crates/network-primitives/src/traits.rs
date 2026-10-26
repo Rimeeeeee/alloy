@@ -1,7 +1,7 @@
 use crate::{BlockTransactions, InclusionInfo};
 use alloy_consensus::{BlockHeader, Transaction};
 use alloy_eips::BlockNumHash;
-use alloy_primitives::{Address, BlockHash, TxHash, B256};
+use alloy_primitives::{Address, BlockHash, TxHash, B256, U256};
 use alloy_serde::WithOtherFields;
 
 /// Error returned when a transaction failed.
@@ -60,17 +60,16 @@ pub trait ReceiptResponse {
     /// Under [EIP-8037](https://eips.ethereum.org/EIPS/eip-8037) this includes both execution and state gas.
     fn gas_used(&self) -> u64;
 
-    /// Effective gas price.
-    fn effective_gas_price(&self) -> u128;
+    /// Full-width effective gas price, in wei per gas.
+    fn effective_gas_price(&self) -> U256;
 
     /// Returns the transaction gas fee in wei: `gas_used * effective_gas_price`.
     /// Includes regular (execution) and state gas where EIP-8037 is active.
     ///
     /// This excludes blob-gas charges, transferred value, and network-specific fee components;
-    /// it is not the sender's total balance change. The ordinary `u128` multiplication can
-    /// overflow, panicking when overflow checks are enabled or wrapping otherwise.
-    fn cost(&self) -> u128 {
-        self.gas_used() as u128 * self.effective_gas_price()
+    /// it is not the sender's total balance change. Saturates at [`U256::MAX`] on overflow.
+    fn cost(&self) -> U256 {
+        U256::from(self.gas_used()).saturating_mul(self.effective_gas_price())
     }
 
     /// Blob gas used by the eip-4844 transaction.
@@ -278,7 +277,7 @@ impl<T: ReceiptResponse> ReceiptResponse for WithOtherFields<T> {
         self.inner.gas_used()
     }
 
-    fn effective_gas_price(&self) -> u128 {
+    fn effective_gas_price(&self) -> U256 {
         self.inner.effective_gas_price()
     }
 
