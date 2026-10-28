@@ -435,7 +435,11 @@ pub struct ChainConfig {
 
     /// Per-chain accounts whose nonce is set to one at the Bogota fork (EIP-8253).
     /// Public test networks use an empty list; custom chains must derive their own list.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "zeroNonceStorageAccounts",
+        alias = "eip8253Accounts",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub eip8253_accounts: Option<Vec<Address>>,
 
     /// BPO1 switch time (None = no fork, 0 = already on BPO1).
@@ -1177,6 +1181,46 @@ mod tests {
         let s = r#"{}"#;
         let genesis: Genesis = serde_json::from_str(s).unwrap();
         assert_eq!(genesis.config.chain_id, 1);
+    }
+
+    #[test]
+    fn eip8253_accounts_use_canonical_json_key() {
+        let accounts = vec![Address::repeat_byte(1), Address::repeat_byte(2)];
+        for key in ["zeroNonceStorageAccounts", "eip8253Accounts"] {
+            let config: ChainConfig = serde_json::from_value(json!({ (key): accounts })).unwrap();
+            assert_eq!(config.eip8253_accounts.as_ref(), Some(&accounts));
+            assert!(!config.extra_fields.contains_key(key));
+
+            let encoded = serde_json::to_value(&config).unwrap();
+            assert_eq!(encoded["zeroNonceStorageAccounts"], json!(accounts));
+            assert!(encoded.get("eip8253Accounts").is_none());
+            assert_eq!(serde_json::from_value::<ChainConfig>(encoded).unwrap(), config);
+        }
+    }
+
+    #[test]
+    fn eip8253_accounts_preserve_empty_and_omitted_lists() {
+        let omitted: ChainConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(omitted.eip8253_accounts, None);
+        assert!(serde_json::to_value(omitted).unwrap().get("zeroNonceStorageAccounts").is_none());
+
+        let empty: ChainConfig =
+            serde_json::from_str(r#"{"zeroNonceStorageAccounts":[]}"#).unwrap();
+        assert_eq!(empty.eip8253_accounts, Some(vec![]));
+        assert_eq!(serde_json::to_value(empty).unwrap()["zeroNonceStorageAccounts"], json!([]));
+    }
+
+    #[test]
+    fn eip8253_accounts_reject_invalid_or_duplicate_configuration() {
+        assert!(serde_json::from_value::<ChainConfig>(json!({
+            "zeroNonceStorageAccounts": ["0x1234"]
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<ChainConfig>(json!({
+            "zeroNonceStorageAccounts": [],
+            "eip8253Accounts": []
+        }))
+        .is_err());
     }
 
     #[test]
