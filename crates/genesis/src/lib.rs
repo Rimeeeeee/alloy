@@ -436,7 +436,7 @@ pub struct ChainConfig {
     /// Accounts whose nonce is set to one at the EIP-8253 transition.
     ///
     /// `None` leaves the chain-specific default to the client; `Some([])` disables the transition.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "zeroNonceStorageAccounts", skip_serializing_if = "Option::is_none")]
     pub eip8253_accounts: Option<Vec<Address>>,
 
     /// BPO1 switch time (None = no fork, 0 = already on BPO1).
@@ -1199,7 +1199,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::{collections::BTreeMap, vec};
+    use alloc::{collections::BTreeMap, string::ToString, vec};
     use alloy_primitives::Bytes;
     use alloy_trie::{root::storage_root_unhashed, TrieAccount};
     use core::str::FromStr;
@@ -1223,24 +1223,47 @@ mod tests {
             let config = ChainConfig { eip8253_accounts: accounts.clone(), ..Default::default() };
             let value = serde_json::to_value(&config).unwrap();
             assert_eq!(value.get("eip8253Accounts").is_some(), accounts.is_some());
-            let decoded: ChainConfig = serde_json::from_value(value).unwrap();
+            assert!(value.get("zeroNonceStorageAccounts").is_none());
+            let decoded: ChainConfig = serde_json::from_value(value.clone()).unwrap();
             assert_eq!(decoded, config);
             assert!(!decoded.extra_fields.contains_key("eip8253Accounts"));
+
+            if let Some(accounts) = accounts {
+                for key in ["eip8253Accounts", "zeroNonceStorageAccounts"] {
+                    let decoded: ChainConfig =
+                        serde_json::from_value(json!({ (key): accounts })).unwrap();
+                    assert_eq!(decoded, config);
+                    assert!(!decoded.extra_fields.contains_key(key));
+                    assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+                }
+            }
         }
     }
 
     #[test]
     fn eip8253_accounts_do_not_populate_genesis_alloc() {
-        let genesis: Genesis = serde_json::from_value(json!({
-            "config": {"eip8253Accounts": EIP8253_MAINNET_ACCOUNTS},
-            "alloc": {}
-        }))
-        .unwrap();
-        assert_eq!(genesis.config.eip8253_accounts, Some(EIP8253_MAINNET_ACCOUNTS.to_vec()));
-        assert!(genesis.alloc.is_empty());
+        for key in ["eip8253Accounts", "zeroNonceStorageAccounts"] {
+            let genesis: Genesis = serde_json::from_value(json!({
+                "config": {(key): EIP8253_MAINNET_ACCOUNTS},
+                "alloc": {}
+            }))
+            .unwrap();
+            assert_eq!(genesis.config.eip8253_accounts, Some(EIP8253_MAINNET_ACCOUNTS.to_vec()));
+            assert!(genesis.alloc.is_empty());
+        }
         let unique =
             EIP8253_MAINNET_ACCOUNTS.into_iter().collect::<alloc::collections::BTreeSet<_>>();
         assert_eq!(unique.len(), 28);
+    }
+
+    #[test]
+    fn eip8253_accounts_reject_duplicate_json_fields() {
+        let error = serde_json::from_value::<ChainConfig>(json!({
+            "eip8253Accounts": [],
+            "zeroNonceStorageAccounts": [EIP8253_MAINNET_ACCOUNTS[0]],
+        }))
+        .unwrap_err();
+        assert_eq!(error.to_string(), "duplicate field `eip8253Accounts`");
     }
 
     #[test]
