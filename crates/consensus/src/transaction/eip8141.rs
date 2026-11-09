@@ -9,12 +9,12 @@ use alloy_eips::{
     eip8141::{
         constants::{
             FRAME_TX_DATA_TOKEN_STANDARD_COST, FRAME_TX_INTRINSIC_COST, FRAME_TX_PER_FRAME_COST,
-            FRAME_TX_TOTAL_COST_FLOOR_PER_TOKEN, FRAME_TX_TYPE, KEYED_NONCE_ACCESS_COST,
-            MAX_FRAMES, TX_VALUE_COST,
+            FRAME_TX_TOTAL_COST_FLOOR_PER_TOKEN, FRAME_TX_TYPE, MAX_FRAMES, TX_VALUE_COST,
         },
         has_valid_assertion_suffix, ApprovalScope, Eip8141Error, Frame, FrameMode, FrameSignature,
         SignatureMessage, TransactionFees,
     },
+    eip8250::{nonce_calldata, validate_nonce_keys, KEYED_NONCE_ACCESS_COST},
     Decodable2718, Encodable2718, Typed2718,
 };
 use alloy_primitives::{keccak256, Address, Bytes, ChainId, Sealable, TxKind, B256, U256};
@@ -92,7 +92,7 @@ fn arbitrary_nonce_keys(
     if !u.arbitrary::<bool>()? {
         return Ok(None);
     }
-    let count = u.int_in_range(1..=alloy_eips::eip8141::MAX_NONCE_KEYS)?;
+    let count = u.int_in_range(1..=alloy_eips::eip8250::MAX_NONCE_KEYS)?;
     let mut keys = (0..count).map(|_| u.arbitrary()).collect::<arbitrary::Result<Vec<U256>>>()?;
     keys.sort_unstable();
     keys.dedup();
@@ -1103,7 +1103,7 @@ impl TxEip8141 {
                 }
                 err => err,
             })?;
-            alloy_eips::eip8141::validate_nonce_keys(&keys).map_err(alloy_rlp::Error::Custom)?;
+            validate_nonce_keys(&keys).map_err(alloy_rlp::Error::Custom)?;
             Some(keys)
         } else {
             None
@@ -1338,7 +1338,7 @@ impl TxEip8141Ref<'_> {
 
     fn validate_inner(&self, allow_placeholders: bool) -> Result<(), &'static str> {
         if let Some(keys) = self.nonce_keys {
-            alloy_eips::eip8141::validate_nonce_keys(keys)?;
+            validate_nonce_keys(keys)?;
         }
         if self.frames.is_empty() || self.frames.len() > MAX_FRAMES {
             return Err("EIP-8141 transaction must contain between 1 and 64 frames");
@@ -1380,10 +1380,10 @@ impl TxEip8141Ref<'_> {
             if frame.has_reserved_flags() {
                 return Err("reserved EIP-8141 frame flag is set");
             }
-            if frame.is_assertion() && frame.is_atomic_batch() {
+            if frame.is_assert() && frame.is_atomic_batch() {
                 return Err("EIP-7906 atomic flag is invalid on ASSERT frames");
             }
-            if frame.is_assertion()
+            if frame.is_assert()
                 && index
                     .checked_sub(1)
                     .is_some_and(|previous| self.frames[previous].is_atomic_batch())
@@ -1487,9 +1487,9 @@ impl TxEip8141Ref<'_> {
             .frames
             .iter()
             .fold(0u64, |acc, frame| acc.saturating_add(count_frame_data_tokens(&frame.data)));
-        let nonce_tokens = self.nonce_keys.map_or(0, |keys| {
-            count_frame_data_tokens(&alloy_eips::eip8141::nonce_calldata(keys, self.nonce))
-        });
+        let nonce_tokens = self
+            .nonce_keys
+            .map_or(0, |keys| count_frame_data_tokens(&nonce_calldata(keys, self.nonce)));
         self.signatures.iter().fold(frame_tokens.saturating_add(nonce_tokens), |acc, signature| {
             acc.saturating_add(count_frame_data_tokens(signature.signer.as_bytes()))
                 .saturating_add(count_frame_data_tokens(signature.msg.as_bytes()))
@@ -1505,9 +1505,8 @@ impl TxEip8141Ref<'_> {
     pub fn frame_calldata_len(&self) -> u64 {
         let frame_data_len =
             self.frames.iter().fold(0u64, |acc, frame| acc.saturating_add(frame.data.len() as u64));
-        let nonce_len = self
-            .nonce_keys
-            .map_or(0, |keys| alloy_eips::eip8141::nonce_calldata(keys, self.nonce).len() as u64);
+        let nonce_len =
+            self.nonce_keys.map_or(0, |keys| nonce_calldata(keys, self.nonce).len() as u64);
         self.signatures.iter().fold(frame_data_len.saturating_add(nonce_len), |acc, signature| {
             acc.saturating_add(signature.signer.as_bytes().len() as u64)
                 .saturating_add(signature.msg.as_bytes().len() as u64)
