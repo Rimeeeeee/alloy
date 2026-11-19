@@ -1,6 +1,10 @@
-use alloc::{borrow::ToOwned, string::ToString, vec::Vec};
+use alloc::vec::Vec;
+#[cfg(feature = "serde")]
+use alloc::{borrow::ToOwned, string::ToString};
 use core::{fmt, mem::size_of};
 
+#[cfg(feature = "serde")]
+use alloy_eips::eip8141::SignatureMessage;
 use alloy_eips::{
     eip2718::{Eip2718Error, Eip2718Result, IsTyped2718},
     eip7594::{Decodable7594, Encodable7594},
@@ -12,9 +16,13 @@ use alloy_eips::{
             FRAME_TX_TOTAL_COST_FLOOR_PER_TOKEN, FRAME_TX_TYPE, MAX_FRAMES, TX_VALUE_COST,
         },
         has_valid_assertion_suffix, ApprovalScope, Eip8141Error, Frame, FrameMode, FrameSignature,
-        SignatureMessage, TransactionFees,
+        TransactionFees,
     },
     eip8250::{nonce_calldata, validate_nonce_keys, KEYED_NONCE_ACCESS_COST},
+    eip8288::{
+        validate_dependency_frame, Dependency, DependencyError, DependencyIter, DEPENDENCY_BYTES,
+        LEANSTARK_VERIFICATION_GAS,
+    },
     Decodable2718, Encodable2718, Typed2718,
 };
 use alloy_primitives::{keccak256, Address, Bytes, ChainId, Sealable, TxKind, B256, U256};
@@ -1300,6 +1308,42 @@ impl TxEip8141 {
             + self.frames.iter().map(|frame| frame.data.len()).sum::<usize>()
             + self.signatures.iter().map(|signature| signature.signature.len()).sum::<usize>()
     }
+
+    /// Returns the sorted, distinct EIP-8288 dependencies, resolving zero messages lazily.
+    ///
+    /// This validates dependency frames, but does not replace full transaction validation.
+    /// Frame bytes remain unchanged, including the zero-message sentinel used in signing.
+    pub fn dependencies(&self) -> Result<Vec<Dependency>, DependencyError> {
+        if self.frames.len() > MAX_FRAMES {
+            return Err(DependencyError::FrameCount);
+        }
+        let mut dependencies = Vec::new();
+        let mut signature_hash = None;
+        for (index, frame) in self.frames.iter().enumerate() {
+            if frame.mode != FrameMode::DependencyVerify {
+                continue;
+            }
+            for dependency in DependencyIter::from_frame(
+                frame,
+                index > 0 && self.frames[index - 1].is_atomic_batch(),
+            )? {
+                let mut dependency = dependency?;
+                if dependency.data_hash.is_zero() {
+                    dependency = dependency
+                        .resolve(*signature_hash.get_or_insert_with(|| self.signature_hash()));
+                }
+                dependencies.push(dependency);
+            }
+        }
+        dependencies.sort_unstable();
+        dependencies.dedup();
+        Ok(dependencies)
+    }
+
+    /// Returns the intrinsic EIP-8288 charge for all declarations, including duplicates.
+    pub fn recursive_stark_gas(&self) -> u64 {
+        self.as_frame_ref().recursive_stark_gas()
+    }
 }
 
 /// Borrowed frame fields for allocation-free structural validation and gas accounting.
@@ -1377,6 +1421,13 @@ impl TxEip8141Ref<'_> {
 
         let mut expiry_verifiers = 0u8;
         for (index, frame) in self.frames.iter().enumerate() {
+            if frame.mode == FrameMode::DependencyVerify {
+                validate_dependency_frame(
+                    frame,
+                    index > 0 && self.frames[index - 1].is_atomic_batch(),
+                )
+                .map_err(|_| "invalid EIP-8288 dependency frame")?;
+            }
             if frame.has_reserved_flags() {
                 return Err("reserved EIP-8141 frame flag is set");
             }
@@ -1523,6 +1574,7 @@ impl TxEip8141Ref<'_> {
             .saturating_add(self.signature_verification_gas())
             .saturating_add(self.value_transfer_gas())
             .saturating_add(self.total_frame_execution_gas_limit())
+            .saturating_add(self.recursive_stark_gas())
     }
 
     /// Calculates the frame transaction gas limit with the provided calldata token gas cost.
@@ -1558,6 +1610,19 @@ impl TxEip8141Ref<'_> {
             None => 0,
             Some(keys) => (keys.len() as u64).saturating_mul(KEYED_NONCE_ACCESS_COST),
         }
+    }
+
+    /// Prices every EIP-8288 declaration before deduplication, including on execution failure.
+    pub fn recursive_stark_gas(&self) -> u64 {
+        self.frames.iter().filter(|frame| frame.mode == FrameMode::DependencyVerify).fold(
+            0u64,
+            |gas, frame| {
+                gas.saturating_add(
+                    ((frame.data.len() / DEPENDENCY_BYTES) as u64)
+                        .saturating_mul(LEANSTARK_VERIFICATION_GAS),
+                )
+            },
+        )
     }
 }
 
@@ -2499,5 +2564,86 @@ mod tests {
             tx.calculate_calldata_floor(),
             FRAME_TX_INTRINSIC_COST + FRAME_TX_PER_FRAME_COST + TX_VALUE_COST
         );
+    }
+
+    #[test]
+    fn dependency_resolution_preserves_signing_bytes_and_charges_duplicates() {
+        let declaration = Dependency {
+            scheme: alloy_eips::eip8288::LEANSPHINCS_SCHEME,
+            data_hash: B256::ZERO,
+            verification_key_hash: B256::repeat_byte(7),
+        };
+        let frame = Frame {
+            mode: FrameMode::DependencyVerify,
+            limits: FrameLimits { execution: 6_000, state: 0 },
+            data: declaration.encode().repeat(2).into(),
+            ..Default::default()
+        };
+        let mut tx = TxEip8141 { frames: vec![frame], ..Default::default() };
+        let encoded = alloy_rlp::encode(&tx);
+        let signature_hash = tx.signature_hash();
+        assert_eq!(tx.validate(), Ok(()));
+        assert_eq!(tx.dependencies(), Ok(vec![declaration.resolve(signature_hash)]));
+        assert_eq!(alloy_rlp::encode(&tx), encoded);
+        assert_eq!(tx.signature_hash(), signature_hash);
+        assert_eq!(tx.recursive_stark_gas(), 60_000);
+        assert_eq!(tx.frames[0].data, declaration.encode().repeat(2));
+        tx.chain_id += 1;
+        assert_ne!(tx.dependencies().unwrap()[0].data_hash, signature_hash);
+        assert_eq!(tx.dependencies().unwrap()[0].data_hash, tx.signature_hash());
+    }
+
+    #[test]
+    fn dependency_gas_agrees_with_borrowed_transaction_and_keeps_calldata_cost() {
+        let declaration = Dependency {
+            scheme: alloy_eips::eip8288::LEANSPHINCS_SCHEME,
+            data_hash: B256::repeat_byte(1),
+            verification_key_hash: B256::repeat_byte(2),
+        };
+        let mut tx = TxEip8141 {
+            frames: vec![Frame {
+                mode: FrameMode::DependencyVerify,
+                limits: FrameLimits { execution: 3_000, state: 0 },
+                data: declaration.encode().to_vec().into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let gas = tx.calculate_execution_gas_limit_with_token_cost(4);
+        assert_eq!(tx.frame_calldata_len(), 96);
+        assert_eq!(tx.recursive_stark_gas(), 30_000);
+        assert_eq!(tx.as_frame_ref().recursive_stark_gas(), 30_000);
+        tx.frames[0].mode = FrameMode::Default;
+        assert_eq!(tx.recursive_stark_gas(), 0);
+        assert_eq!(gas - tx.calculate_execution_gas_limit_with_token_cost(4), 30_000);
+    }
+
+    #[test]
+    fn dependency_sorting_and_static_validation() {
+        let mut first = Dependency {
+            scheme: alloy_eips::eip8288::LEANSPHINCS_SCHEME,
+            data_hash: B256::repeat_byte(2),
+            verification_key_hash: B256::repeat_byte(1),
+        };
+        let mut data = first.encode().to_vec();
+        first.data_hash = B256::repeat_byte(1);
+        data.extend_from_slice(&first.encode());
+        let mut tx = TxEip8141 {
+            frames: vec![Frame {
+                mode: FrameMode::DependencyVerify,
+                limits: FrameLimits { execution: 6_000, state: 0 },
+                data: data.into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(tx.dependencies().unwrap()[0], first);
+        tx.frames[0].target = Address::ZERO.into();
+        assert_eq!(tx.validate(), Err("invalid EIP-8288 dependency frame"));
+        assert_eq!(tx.dependencies(), Err(DependencyError::FrameFields));
+        tx.frames[0].target = Default::default();
+        tx.frames.insert(0, Frame { flags: 4, ..Default::default() });
+        assert_eq!(tx.validate(), Err("invalid EIP-8288 dependency frame"));
+        assert_eq!(tx.dependencies(), Err(DependencyError::AtomicBatch));
     }
 }

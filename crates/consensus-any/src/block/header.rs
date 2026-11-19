@@ -119,6 +119,9 @@ pub struct AnyHeader {
         )
     )]
     pub slot_number: Option<u64>,
+    /// EIP-8288 dependency proof.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub recursive_stark: Option<alloc::boxed::Box<alloy_eips::eip8288::RecursiveStark>>,
 }
 
 impl AnyHeader {
@@ -176,6 +179,7 @@ impl AnyHeader {
             requests_hash,
             block_access_list_hash,
             slot_number,
+            recursive_stark,
         } = self;
 
         Header {
@@ -202,6 +206,7 @@ impl AnyHeader {
             requests_hash,
             block_access_list_hash,
             slot_number,
+            recursive_stark,
         }
     }
 }
@@ -295,6 +300,10 @@ impl BlockHeader for AnyHeader {
         self.slot_number
     }
 
+    fn recursive_stark(&self) -> Option<&alloy_eips::eip8288::RecursiveStark> {
+        self.recursive_stark.as_deref()
+    }
+
     fn extra_data(&self) -> &Bytes {
         &self.extra_data
     }
@@ -326,6 +335,7 @@ impl From<Header> for AnyHeader {
             requests_hash,
             block_access_list_hash,
             slot_number,
+            recursive_stark,
         } = value;
 
         Self {
@@ -352,6 +362,7 @@ impl From<Header> for AnyHeader {
             requests_hash,
             block_access_list_hash,
             slot_number,
+            recursive_stark,
         }
     }
 }

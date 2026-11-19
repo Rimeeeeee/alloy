@@ -3,7 +3,7 @@ use crate::{
     constants::{EMPTY_OMMER_ROOT_HASH, EMPTY_ROOT_HASH},
     Block, BlockBody,
 };
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 use alloy_eips::{
     eip1559::{
         calc_next_block_base_fee, calculate_block_gas_limit_with_bound_divisor, BaseFeeParams,
@@ -11,6 +11,7 @@ use alloy_eips::{
     },
     eip1898::BlockWithParent,
     eip7840::BlobParams,
+    eip8288::RecursiveStark,
     merge::ALLOWED_FUTURE_BLOCK_TIME_SECONDS,
     BlockNumHash,
 };
@@ -159,6 +160,9 @@ pub struct Header {
         )
     )]
     pub slot_number: Option<u64>,
+    /// EIP-8288 dependency proof, absent before activation.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub recursive_stark: Option<Box<RecursiveStark>>,
 }
 
 impl AsRef<Self> for Header {
@@ -193,6 +197,7 @@ impl Default for Header {
             requests_hash: None,
             block_access_list_hash: None,
             slot_number: None,
+            recursive_stark: None,
         }
     }
 }
@@ -282,7 +287,12 @@ impl Header {
     /// Calculate a heuristic for the in-memory size of the [Header].
     #[inline]
     pub fn size(&self) -> usize {
-        size_of::<Self>() + self.extra_data.len()
+        size_of::<Self>()
+            + self.extra_data.len()
+            + self
+                .recursive_stark
+                .as_ref()
+                .map_or(0, |proof| size_of::<RecursiveStark>() + proof.stark_proof.len())
     }
 
     fn header_payload_length(&self) -> usize {
@@ -333,6 +343,10 @@ impl Header {
 
         if let Some(slot_number) = self.slot_number {
             length += slot_number.length();
+        }
+
+        if let Some(proof) = &self.recursive_stark {
+            length += proof.length();
         }
 
         length
@@ -449,6 +463,10 @@ impl Encodable for Header {
         if let Some(ref slot_number) = self.slot_number {
             slot_number.encode(out);
         }
+
+        if let Some(proof) = &self.recursive_stark {
+            proof.encode(out);
+        }
     }
 
     fn length(&self) -> usize {
@@ -490,6 +508,7 @@ impl Decodable for Header {
             requests_hash: None,
             block_access_list_hash: None,
             slot_number: None,
+            recursive_stark: None,
         };
         if started_len - buf.len() < rlp_head.payload_length {
             this.base_fee_per_gas = Some(u64::decode(buf)?);
@@ -527,6 +546,10 @@ impl Decodable for Header {
         // Decode slot number.
         if started_len - buf.len() < rlp_head.payload_length {
             this.slot_number = Some(u64::decode(buf)?);
+        }
+
+        if started_len - buf.len() < rlp_head.payload_length {
+            this.recursive_stark = Some(Box::new(RecursiveStark::decode(buf)?));
         }
 
         let consumed = started_len - buf.len();
@@ -573,6 +596,7 @@ impl<'a> arbitrary::Arbitrary<'a> for Header {
             // Amsterdam fields do not yet participate in the hardfork-aware arbitrary model.
             block_access_list_hash: None,
             slot_number: None,
+            recursive_stark: None,
         })
     }
 }
@@ -694,6 +718,11 @@ pub trait BlockHeader {
     ///
     /// [EIP-7843]: https://eips.ethereum.org/EIPS/eip-7843
     fn slot_number(&self) -> Option<u64>;
+
+    /// Returns the EIP-8288 proof when the header format supports it.
+    fn recursive_stark(&self) -> Option<&RecursiveStark> {
+        None
+    }
 
     /// Retrieves the block's extra data field
     fn extra_data(&self) -> &Bytes;
@@ -934,6 +963,10 @@ impl BlockHeader for Header {
         self.slot_number
     }
 
+    fn recursive_stark(&self) -> Option<&RecursiveStark> {
+        self.recursive_stark.as_deref()
+    }
+
     fn extra_data(&self) -> &Bytes {
         &self.extra_data
     }
@@ -1029,6 +1062,10 @@ impl<T: BlockHeader> BlockHeader for alloy_serde::WithOtherFields<T> {
         self.inner.slot_number()
     }
 
+    fn recursive_stark(&self) -> Option<&RecursiveStark> {
+        self.inner.recursive_stark()
+    }
+
     fn extra_data(&self) -> &Bytes {
         self.inner.extra_data()
     }
@@ -1041,7 +1078,8 @@ impl<T: BlockHeader> BlockHeader for alloy_serde::WithOtherFields<T> {
 /// Bincode-compatible [`Header`] serde implementation.
 #[cfg(all(feature = "serde", feature = "serde-bincode-compat"))]
 pub(crate) mod serde_bincode_compat {
-    use alloc::borrow::Cow;
+    use alloc::{borrow::Cow, boxed::Box};
+    use alloy_eips::eip8288::RecursiveStark;
     use alloy_primitives::{Address, BlockNumber, Bloom, Bytes, B256, B64, U256};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use serde_with::{DeserializeAs, SerializeAs};
@@ -1093,6 +1131,8 @@ pub(crate) mod serde_bincode_compat {
         block_access_list_hash: Option<B256>,
         #[serde(default)]
         slot_number: Option<u64>,
+        #[serde(default)]
+        recursive_stark: Option<Box<RecursiveStark>>,
         extra_data: Cow<'a, Bytes>,
     }
 
@@ -1121,6 +1161,7 @@ pub(crate) mod serde_bincode_compat {
                 requests_hash: value.requests_hash,
                 block_access_list_hash: value.block_access_list_hash,
                 slot_number: value.slot_number,
+                recursive_stark: value.recursive_stark.clone(),
                 extra_data: Cow::Borrowed(&value.extra_data),
             }
         }
@@ -1151,6 +1192,7 @@ pub(crate) mod serde_bincode_compat {
                 requests_hash: value.requests_hash,
                 block_access_list_hash: value.block_access_list_hash,
                 slot_number: value.slot_number,
+                recursive_stark: value.recursive_stark,
                 extra_data: value.extra_data.into_owned(),
             }
         }
@@ -1189,6 +1231,37 @@ pub(crate) mod serde_bincode_compat {
 mod tests {
     use super::*;
     use alloy_primitives::{b256, hex};
+
+    #[test]
+    fn recursive_stark_header_roundtrip() {
+        let mut header = Header {
+            base_fee_per_gas: Some(1),
+            withdrawals_root: Some(B256::ZERO),
+            blob_gas_used: Some(0),
+            excess_blob_gas: Some(0),
+            parent_beacon_block_root: Some(B256::ZERO),
+            requests_hash: Some(B256::ZERO),
+            block_access_list_hash: Some(B256::ZERO),
+            slot_number: Some(1),
+            ..Default::default()
+        };
+        let before = header.hash_slow();
+        let entry = RecursiveStark {
+            stark_proof: Bytes::from_static(&[1, 2, 3]),
+            block_deps_hash: B256::repeat_byte(7),
+        };
+        header.recursive_stark = Some(Box::new(entry));
+        let bytes = alloy_rlp::encode(&header);
+        let decoded: Header = alloy_rlp::decode_exact(&bytes).unwrap();
+        assert_eq!(decoded, header);
+        assert_ne!(before, decoded.hash_slow());
+        assert_eq!(bytes.len(), header.length());
+        #[cfg(feature = "serde")]
+        assert_eq!(
+            serde_json::from_str::<Header>(&serde_json::to_string(&header).unwrap()).unwrap(),
+            header
+        );
+    }
 
     #[test]
     fn validate_gas_limit() {

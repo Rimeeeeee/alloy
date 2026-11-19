@@ -35,6 +35,7 @@ fn payload_v4() -> ExecutionPayloadV4 {
         payload_inner: payload_v3(),
         block_access_list: Bytes::from_static(&[19, 20]),
         slot_number: 21,
+        recursive_stark: None,
     }
 }
 
