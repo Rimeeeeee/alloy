@@ -67,3 +67,172 @@ license-files = [{ path = "LICENSE", hash = 0x001c7e6c }]
 [sources]
 unknown-registry = "deny"
 unknown-git = "allow"
+
+# Pinned leanVM packages use repository-level license files, verified by their hashes.
+[[licenses.clarify]]
+name = "aggregation"
+expression = "MIT OR Apache-2.0"
+license-files = [
+    { path = "../../LICENSE-MIT", hash = 0x5cd56fbe },
+    { path = "../../LICENSE-APACHE", hash = 0x1e68a187 },
+]
+
+[[licenses.clarify]]
+name = "claims"
+expression = "MIT OR Apache-2.0"
+license-files = [
+    { path = "../../LICENSE-MIT", hash = 0x5cd56fbe },
+    { path = "../../LICENSE-APACHE", hash = 0x1e68a187 },
+]
+
+[[licenses.clarify]]
+name = "experimental_keccak_gkr"
+expression = "MIT OR Apache-2.0"
+license-files = [
+    { path = "../../../LICENSE-MIT", hash = 0x5cd56fbe },
+    { path = "../../../LICENSE-APACHE", hash = 0x1e68a187 },
+]
+
+[[licenses.clarify]]
+name = "experimental_lean_vm_core"
+expression = "MIT OR Apache-2.0"
+license-files = [
+    { path = "../../../LICENSE-MIT", hash = 0x5cd56fbe },
+    { path = "../../../LICENSE-APACHE", hash = 0x1e68a187 },
+]
+
+[[licenses.clarify]]
+name = "experimental_parallel"
+expression = "MIT OR Apache-2.0"
+license-files = [
+    { path = "../../../LICENSE-MIT", hash = 0x5cd56fbe },
+    { path = "../../../LICENSE-APACHE", hash = 0x1e68a187 },
+]
+
+[[licenses.clarify]]
+name = "experimental_pcs"
+expression = "MIT OR Apache-2.0"
+license-files = [
+    { path = "../../../LICENSE-MIT", hash = 0x5cd56fbe },
+    { path = "../../../LICENSE-APACHE", hash = 0x1e68a187 },
+]
+
+[[licenses.clarify]]
+name = "experimental_primitives"
+expression = "MIT OR Apache-2.0"
+license-files = [
+    { path = "../../../LICENSE-MIT", hash = 0x5cd56fbe },
+    { path = "../../../LICENSE-APACHE", hash = 0x1e68a187 },
+]
+
+[[licenses.clarify]]
+name = "fiat_shamir_prover"
+expression = "MIT OR Apache-2.0"
+license-files = [
+    { path = "../../LICENSE-MIT", hash = 0x5cd56fbe },
+    { path = "../../LICENSE-APACHE", hash = 0x1e68a187 },
+]
+
+[[licenses.clarify]]
+name = "isa"
+expression = "MIT OR Apache-2.0"
+license-files = [
+    { path = "../../LICENSE-MIT", hash = 0x5cd56fbe },
+    { path = "../../LICENSE-APACHE", hash = 0x1e68a187 },
+]
+
+[[licenses.clarify]]
+name = "keccak256"
+expression = "MIT OR Apache-2.0"
+license-files = [
+    { path = "../../LICENSE-MIT", hash = 0x5cd56fbe },
+    { path = "../../LICENSE-APACHE", hash = 0x1e68a187 },
+]
+
+[[licenses.clarify]]
+name = "lean_da"
+expression = "MIT OR Apache-2.0"
+license-files = [
+    { path = "../../LICENSE-MIT", hash = 0x5cd56fbe },
+    { path = "../../LICENSE-APACHE", hash = 0x1e68a187 },
+]
+
+[[licenses.clarify]]
+name = "lean_sphincs"
+expression = "MIT OR Apache-2.0"
+license-files = [
+    { path = "../../LICENSE-MIT", hash = 0x5cd56fbe },
+    { path = "../../LICENSE-APACHE", hash = 0x1e68a187 },
+]
+
+[[licenses.clarify]]
+name = "lean_vm"
+expression = "MIT OR Apache-2.0"
+license-files = [
+    { path = "../../LICENSE-MIT", hash = 0x5cd56fbe },
+    { path = "../../LICENSE-APACHE", hash = 0x1e68a187 },
+]
+
+[[licenses.clarify]]
+name = "lean_xmss"
+expression = "MIT OR Apache-2.0"
+license-files = [
+    { path = "../../LICENSE-MIT", hash = 0x5cd56fbe },
+    { path = "../../LICENSE-APACHE", hash = 0x1e68a187 },
+]
+
+[[licenses.clarify]]
+name = "stable_keccak_gkr"
+expression = "MIT OR Apache-2.0"
+license-files = [
+    { path = "../../../LICENSE-MIT", hash = 0x5cd56fbe },
+    { path = "../../../LICENSE-APACHE", hash = 0x1e68a187 },
+]
+
+[[licenses.clarify]]
+name = "stable_lean_vm_core"
+expression = "MIT OR Apache-2.0"
+license-files = [
+    { path = "../../../LICENSE-MIT", hash = 0x5cd56fbe },
+    { path = "../../../LICENSE-APACHE", hash = 0x1e68a187 },
+]
+
+[[licenses.clarify]]
+name = "stable_parallel"
+expression = "MIT OR Apache-2.0"
+license-files = [
+    { path = "../../../LICENSE-MIT", hash = 0x5cd56fbe },
+    { path = "../../../LICENSE-APACHE", hash = 0x1e68a187 },
+]
+
+[[licenses.clarify]]
+name = "stable_pcs"
+expression = "MIT OR Apache-2.0"
+license-files = [
+    { path = "../../../LICENSE-MIT", hash = 0x5cd56fbe },
+    { path = "../../../LICENSE-APACHE", hash = 0x1e68a187 },
+]
+
+[[licenses.clarify]]
+name = "stable_primitives"
+expression = "MIT OR Apache-2.0"
+license-files = [
+    { path = "../../../LICENSE-MIT", hash = 0x5cd56fbe },
+    { path = "../../../LICENSE-APACHE", hash = 0x1e68a187 },
+]
+
+[[licenses.clarify]]
+name = "verifier"
+expression = "MIT OR Apache-2.0"
+license-files = [
+    { path = "../../LICENSE-MIT", hash = 0x5cd56fbe },
+    { path = "../../LICENSE-APACHE", hash = 0x1e68a187 },
+]
+
+[[licenses.clarify]]
+name = "zkdsl_compiler"
+expression = "MIT OR Apache-2.0"
+license-files = [
+    { path = "../../LICENSE-MIT", hash = 0x5cd56fbe },
+    { path = "../../LICENSE-APACHE", hash = 0x1e68a187 },
+]
