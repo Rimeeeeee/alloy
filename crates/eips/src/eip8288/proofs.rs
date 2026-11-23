@@ -14,7 +14,7 @@ use std::{
     sync::{Arc, Once},
 };
 
-/// Maximum canonical dependencies in an experimental recursive wrapper.
+/// Maximum canonical dependencies in an experimental block aggregate.
 pub const MAX_AGGREGATE_DEPENDENCIES: usize = 16_384;
 /// Maximum serialized aggregate proof accepted by this devnet profile.
 pub const MAX_PROOF_BYTES: usize = 1_048_576;
@@ -101,6 +101,15 @@ pub fn prove(
     let mut children: Vec<(AggregateClaims, AggregateProof)> = Vec::new();
     let retained = claims(dependencies);
     for input in inputs {
+        // Unrelated child proofs cannot contribute to the output or a consolidation batch.
+        if matches!(&input.witness, Witness::Aggregate(_))
+            && !input
+                .dependencies
+                .iter()
+                .any(|dependency| dependencies.binary_search(dependency).is_ok())
+        {
+            continue;
+        }
         input.verify()?;
         match &input.witness {
             Witness::Direct(signatures) => {
@@ -260,6 +269,34 @@ mod tests {
     }
 
     #[test]
+    fn block_aggregation_retains_its_larger_dependency_limit() {
+        use super::super::MAX_LEANSIG_DEPS_PER_WRAPPER;
+        use alloy_primitives::U256;
+
+        for count in [
+            MAX_LEANSIG_DEPS_PER_WRAPPER + 1,
+            MAX_AGGREGATE_DEPENDENCIES,
+            MAX_AGGREGATE_DEPENDENCIES + 1,
+        ] {
+            let dependencies = (0..count)
+                .map(|index| SignatureDependency {
+                    scheme: LEANSPHINCS_SCHEME,
+                    data_hash: B256::from(U256::from(index).to_be_bytes::<32>()),
+                    verification_key_hash: B256::repeat_byte(1),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                validate_dependencies(&dependencies),
+                if count <= MAX_AGGREGATE_DEPENDENCIES {
+                    Ok(())
+                } else {
+                    Err(ProofError::Dependencies)
+                }
+            );
+        }
+    }
+
+    #[test]
     fn real_signatures_recursion_and_discard_preserve_exact_coverage() {
         let seed = [7; lean_sphincs::SECRET_KEY_LEN];
         let key = lean_sphincs::key_gen(&seed);
@@ -286,9 +323,21 @@ mod tests {
         let reused = prove(&dependencies, &[Arc::clone(&child)]).unwrap();
         assert_eq!(reused.stark_proof.as_ref(), child.wire_witnesses().1[0].as_ref());
         let retained = &dependencies[..1];
-        let root = prove(retained, &[child, direct]).unwrap();
+        let root = prove(retained, &[child, Arc::clone(&direct)]).unwrap();
         assert_eq!(verify_header(retained, &root), Ok(()));
         assert_eq!(verify_header(&dependencies, &root), Err(ProofError::Coverage));
+
+        // More than a batch of unrelated valid children must not trigger empty consolidation.
+        let unrelated = Arc::new(
+            DependencyEvidence::aggregate(retained.to_vec(), root.stark_proof.clone()).unwrap(),
+        );
+        let mut inputs = vec![unrelated; lean_vm::MAX_RECURSIONS + 1];
+        inputs.push(direct);
+        let selected = &dependencies[1..];
+        let selected_proof = prove(selected, &inputs).unwrap();
+        assert_eq!(verify_header(selected, &selected_proof), Ok(()));
+        assert_eq!(verify_header(&dependencies, &selected_proof), Err(ProofError::Coverage));
+
         let wrong = RecursiveStark {
             block_deps_hash: dependency_digest(&dependencies),
             stark_proof: root.stark_proof,

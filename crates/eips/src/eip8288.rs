@@ -2,9 +2,9 @@
 //!
 //! The `eip8288-proofs` feature enables the experimental pinned leanVM backend and requires
 //! Rust 1.97.1. It uses a Keccak dependency digest and native leanVM claims, rather than fixing
-//! the draft's still-unspecified protocol hash and verification key. Direct wrappers retain the
-//! draft's 16-signature limit; recursive wrappers allow up to 16,384 dependencies within bounded
-//! proof and transport sizes. Application leanSTARK declarations remain reserved and invalid.
+//! the draft's still-unspecified protocol hash and verification key. Both wrapper modes retain the
+//! draft's 16-signature limit; block aggregates allow up to 16,384 dependencies within bounded
+//! proof sizes. Application leanSTARK declarations remain reserved and invalid.
 
 use alloy_eip8141::{Frame, FrameMode};
 use alloy_primitives::{Bytes, B256};

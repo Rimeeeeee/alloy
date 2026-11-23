@@ -2,6 +2,11 @@
 retries = { backoff = "exponential", count = 2, delay = "2s", jitter = true }
 slow-timeout = { period = "30s", terminate-after = 4 }
 
+# Real recursive proving in debug builds can exceed the default two-minute limit.
+[[profile.default.overrides]]
+filter = "package(alloy-eips) & test(real_signatures_recursion_and_discard_preserve_exact_coverage)"
+slow-timeout = { period = "60s", terminate-after = 10 }
+
 [[profile.default.overrides]]
 filter = "test(can_launch_reth_custom_ports)"
 retries = { backoff = "exponential", count = 5, delay = "3s", jitter = true }

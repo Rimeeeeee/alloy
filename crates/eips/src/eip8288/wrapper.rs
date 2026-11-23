@@ -39,7 +39,7 @@ impl DependencyWrapper {
             return Err(ProofError::Wrapper);
         }
         let dependencies =
-            decode_list::<SignatureDependency>(&mut bytes, MAX_AGGREGATE_DEPENDENCIES)?;
+            decode_list::<SignatureDependency>(&mut bytes, MAX_LEANSIG_DEPS_PER_WRAPPER)?;
         let evidence = match mode {
             0 => DependencyEvidence::direct(
                 dependencies,
@@ -61,6 +61,7 @@ impl DependencyWrapper {
     pub fn encode(&self) -> Result<Bytes, ProofError> {
         if self.transactions.len() > MAX_AGGREGATE_DEPENDENCIES
             || self.transactions.iter().any(|transaction| transaction.len() < 32)
+            || self.evidence.dependencies.len() > MAX_LEANSIG_DEPS_PER_WRAPPER
         {
             return Err(ProofError::Wrapper);
         }
@@ -120,6 +121,75 @@ fn decode_list<T: Decodable>(bytes: &mut &[u8], limit: usize) -> Result<Vec<T>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::eip8288::LEANSPHINCS_SCHEME;
+    use alloy_primitives::B256;
+
+    // Independent wire construction exercises decoding even when encode rejects the wrapper.
+    #[derive(alloy_rlp::RlpEncodable)]
+    struct WireContent<T: Encodable> {
+        dependencies: Vec<SignatureDependency>,
+        witnesses: T,
+    }
+
+    #[derive(alloy_rlp::RlpEncodable)]
+    struct WireWrapper<T: Encodable> {
+        transactions: Vec<Bytes>,
+        mode: u8,
+        content: WireContent<T>,
+    }
+
+    #[test]
+    fn wrapper_dependency_limit_applies_to_both_modes() {
+        for count in [
+            MAX_LEANSIG_DEPS_PER_WRAPPER - 1,
+            MAX_LEANSIG_DEPS_PER_WRAPPER,
+            MAX_LEANSIG_DEPS_PER_WRAPPER + 1,
+        ] {
+            let dependencies = (0..count)
+                .map(|index| SignatureDependency {
+                    scheme: LEANSPHINCS_SCHEME,
+                    data_hash: B256::repeat_byte(index as u8),
+                    verification_key_hash: B256::repeat_byte(1),
+                })
+                .collect::<Vec<_>>();
+            let transactions = vec![Bytes::from(vec![1; 32])];
+            let proof = Bytes::from_static(&[1]);
+            let direct = alloy_rlp::encode(WireWrapper {
+                transactions: transactions.clone(),
+                mode: 0,
+                content: WireContent {
+                    dependencies: dependencies.clone(),
+                    witnesses: vec![Bytes::from(vec![0; lean_vm::lean_sphincs::SIG_SIZE]); count],
+                },
+            });
+            let aggregate = alloy_rlp::encode(WireWrapper {
+                transactions: transactions.clone(),
+                mode: 1,
+                content: WireContent {
+                    dependencies: dependencies.clone(),
+                    witnesses: proof.clone(),
+                },
+            });
+            for encoded in [direct, aggregate] {
+                if count <= MAX_LEANSIG_DEPS_PER_WRAPPER {
+                    let decoded = DependencyWrapper::decode(&encoded).unwrap();
+                    assert_eq!(decoded.evidence.dependencies(), dependencies);
+                    assert_eq!(decoded.encode().unwrap(), encoded);
+                } else {
+                    assert_eq!(
+                        DependencyWrapper::decode(&encoded).unwrap_err(),
+                        ProofError::Wrapper
+                    );
+                }
+            }
+            // Block evidence may exceed the wrapper limit, but must not be sent as a wrapper.
+            let wrapper = DependencyWrapper {
+                transactions,
+                evidence: Arc::new(DependencyEvidence::aggregate(dependencies, proof).unwrap()),
+            };
+            assert_eq!(wrapper.encode().is_ok(), count <= MAX_LEANSIG_DEPS_PER_WRAPPER);
+        }
+    }
 
     #[test]
     fn wrapper_encoding_is_bounded_and_canonical() {
