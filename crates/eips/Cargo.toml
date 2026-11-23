@@ -64,6 +64,10 @@ borsh = { workspace = true, optional = true, features = ["derive"] }
 
 # misc
 auto_impl.workspace = true
+thiserror.workspace = true
+
+# eip8288-proofs
+lean_vm = { workspace = true, optional = true }
 
 [dev-dependencies]
 alloy-primitives = { workspace = true, features = [
@@ -75,6 +79,8 @@ arbitrary = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 
 [features]
+# Experimental pinned backend; requires Rust 1.97.1.
+eip8288-proofs = ["std", "dep:lean_vm"]
 default = ["std", "kzg-sidecar"]
 std = [
 	"alloy-primitives/std",
@@ -92,7 +98,8 @@ std = [
 	"sha2?/std",
 	"either/std",
 	"serde_with?/std",
-	"borsh?/std"
+	"borsh?/std",
+	"thiserror/std"
 ]
 serde = [
 	"dep:alloy-serde",

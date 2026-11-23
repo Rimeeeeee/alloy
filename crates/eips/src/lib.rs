@@ -72,3 +72,6 @@ pub mod eip8282;
 pub mod eip7906;
 
 pub mod eip8288;
+
+/// EIP-8253 zero-nonce account transition.
+pub mod eip8253;

@@ -17,7 +17,7 @@ use alloy_eips::{
     eip7840::{self, BlobParams},
     BlobScheduleBlobParams,
 };
-use alloy_primitives::{address, keccak256, Address, Bytes, B256, U256};
+use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use alloy_serde::{storage::deserialize_storage_map, OtherFields};
 use alloy_trie::{TrieAccount, EMPTY_ROOT_HASH, KECCAK_EMPTY};
 use core::str::FromStr;
@@ -436,8 +436,8 @@ pub struct ChainConfig {
     /// Accounts whose nonce is set to one at the EIP-8253 transition.
     ///
     /// `None` leaves the chain-specific default to the client; `Some([])` disables the transition.
-    #[serde(alias = "zeroNonceStorageAccounts", skip_serializing_if = "Option::is_none")]
-    pub eip8253_accounts: Option<Vec<Address>>,
+    #[serde(alias = "eip8253Accounts", skip_serializing_if = "Option::is_none")]
+    pub zero_nonce_storage_accounts: Option<Vec<Address>>,
 
     /// BPO1 switch time (None = no fork, 0 = already on BPO1).
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_u64_opt")]
@@ -499,40 +499,6 @@ pub struct ChainConfig {
     #[serde(skip)]
     pub _non_exhaustive: (),
 }
-
-/// Mainnet accounts whose nonce is set to one by EIP-8253.
-///
-/// Source: <https://github.com/ethereum/EIPs/blob/573ff960/assets/eip-8253/targeted-accounts.json>.
-pub const EIP8253_MAINNET_ACCOUNTS: [Address; 28] = [
-    address!("f468bcbc4a0bfdb06336e773382c5202e674db71"),
-    address!("d8253352f6044cfe55bcc0748c3fa37b7df81f98"),
-    address!("5983c6ac846dcf85fbbc4303f43eb91c379f79ae"),
-    address!("de425ad4b8d2d9e0e12f65cbcd6d55f447b44083"),
-    address!("50b1497068bae652df3562eb8ea7677ff84477fa"),
-    address!("8398ff6c618e9515468c1c4b198d53666cbe8462"),
-    address!("6f156dbf8ed30e53f7c9df73144e69f65cbb7e94"),
-    address!("2c081ed1949d7dd9447f9d96e509befe576d4461"),
-    address!("db7c577b93baeb56dab50af4d6f86f99a06b96a2"),
-    address!("14725085d004f1b10ee07234a4ab28c5ad2a7b9e"),
-    address!("ae3703584494ade958ad27ec2d289b7a67c19e90"),
-    address!("7d6ae067de8d44ae1a08750e7d626d61a623c44a"),
-    address!("4d149eb99bdeefc1f858f8fd22289c6beae99f2c"),
-    address!("361d7a60b43587c7f6bba4f9fd9642747f65210a"),
-    address!("b619f45637c39ca49a41ac64c11637a0a194455e"),
-    address!("5071cb62aa170b7f66b26cae8004d90e6078bb1e"),
-    address!("add92e0650457c5db0c4c08cbf7ca580175d33d2"),
-    address!("3311c08066580cb906a7287b6786e504c2ebd09f"),
-    address!("02820e4bee488c40f7455fdca53125565148708f"),
-    address!("e62dc49c92fa799033644d2a9afd7e3babe5a80a"),
-    address!("5cc182fabfb81a056b6080d4200bc5150673d06f"),
-    address!("f4a835ec1364809003de3925685f24cd360bdffe"),
-    address!("fc4465f84b29a1f8794dc753f41bef1f4b025ed2"),
-    address!("40490c9c468622d5c89646d6f3097f8eaf80c411"),
-    address!("a21b22389bfc1cd6bc7ba19a4fc96adc3d0fe074"),
-    address!("59ec0410867828e3b8c23dd8a29d9796ef523b17"),
-    address!("19272418753b90d9a3e3efc8430b1612c55fcb3a"),
-    address!("fee7707fa4b8c0a923a0e40399db3e7ce26069c6"),
-];
 
 /// Bincode-compatible [`ChainConfig`] serde implementation.
 #[cfg(feature = "serde-bincode-compat")]
@@ -636,7 +602,7 @@ pub mod serde_bincode_compat {
         #[serde(default)]
         extra_fields: BTreeMap<String, String>,
         #[serde(default)]
-        eip8253_accounts: Option<Cow<'a, [Address]>>,
+        zero_nonce_storage_accounts: Option<Cow<'a, [Address]>>,
     }
 
     impl<'a> From<&'a super::ChainConfig> for ChainConfig<'a> {
@@ -677,7 +643,10 @@ pub mod serde_bincode_compat {
                 parlia: value.parlia,
                 deposit_contract_address: value.deposit_contract_address,
                 blob_schedule: Cow::Borrowed(&value.blob_schedule),
-                eip8253_accounts: value.eip8253_accounts.as_deref().map(Cow::Borrowed),
+                zero_nonce_storage_accounts: value
+                    .zero_nonce_storage_accounts
+                    .as_deref()
+                    .map(Cow::Borrowed),
                 // Convert all serde_json::Value types to string for bincode compatibility
                 extra_fields: value
                     .extra_fields
@@ -734,7 +703,7 @@ pub mod serde_bincode_compat {
                     .collect(),
                 deposit_contract_address: value.deposit_contract_address,
                 blob_schedule: value.blob_schedule.into_owned(),
-                eip8253_accounts: value.eip8253_accounts.map(Cow::into_owned),
+                zero_nonce_storage_accounts: value.zero_nonce_storage_accounts.map(Cow::into_owned),
                 _non_exhaustive: (),
             }
         }
@@ -844,7 +813,7 @@ pub mod serde_bincode_compat {
                 osaka_time: None,
                 amsterdam_time: None,
                 bogota_time: Some(700),
-                eip8253_accounts: Some(crate::EIP8253_MAINNET_ACCOUNTS.to_vec()),
+                zero_nonce_storage_accounts: Some(alloy_eips::eip8253::MAINNET_ACCOUNTS.to_vec()),
                 bpo1_time: None,
                 bpo2_time: None,
                 bpo3_time: None,
@@ -886,11 +855,12 @@ pub mod serde_bincode_compat {
         }
 
         #[test]
-        fn eip8253_accounts_bincode_roundtrip() {
-            for accounts in [None, Some(Vec::new()), Some(crate::EIP8253_MAINNET_ACCOUNTS.to_vec())]
+        fn zero_nonce_storage_accounts_bincode_roundtrip() {
+            for accounts in
+                [None, Some(Vec::new()), Some(alloy_eips::eip8253::MAINNET_ACCOUNTS.to_vec())]
             {
                 assert_bincode_roundtrip(ChainConfig {
-                    eip8253_accounts: accounts,
+                    zero_nonce_storage_accounts: accounts,
                     ..Default::default()
                 });
             }
@@ -1102,7 +1072,7 @@ impl Default for ChainConfig {
             osaka_time: None,
             amsterdam_time: None,
             bogota_time: None,
-            eip8253_accounts: None,
+            zero_nonce_storage_accounts: None,
             bpo1_time: None,
             bpo2_time: None,
             bpo3_time: None,
@@ -1218,12 +1188,15 @@ mod tests {
     }
 
     #[test]
-    fn eip8253_accounts_json_roundtrip() {
-        for accounts in [None, Some(Vec::new()), Some(EIP8253_MAINNET_ACCOUNTS.to_vec())] {
-            let config = ChainConfig { eip8253_accounts: accounts.clone(), ..Default::default() };
+    fn zero_nonce_storage_accounts_json_roundtrip() {
+        for accounts in
+            [None, Some(Vec::new()), Some(alloy_eips::eip8253::MAINNET_ACCOUNTS.to_vec())]
+        {
+            let config =
+                ChainConfig { zero_nonce_storage_accounts: accounts.clone(), ..Default::default() };
             let value = serde_json::to_value(&config).unwrap();
-            assert_eq!(value.get("eip8253Accounts").is_some(), accounts.is_some());
-            assert!(value.get("zeroNonceStorageAccounts").is_none());
+            assert_eq!(value.get("zeroNonceStorageAccounts").is_some(), accounts.is_some());
+            assert!(value.get("eip8253Accounts").is_none());
             let decoded: ChainConfig = serde_json::from_value(value.clone()).unwrap();
             assert_eq!(decoded, config);
             assert!(!decoded.extra_fields.contains_key("eip8253Accounts"));
@@ -1241,29 +1214,33 @@ mod tests {
     }
 
     #[test]
-    fn eip8253_accounts_do_not_populate_genesis_alloc() {
+    fn zero_nonce_storage_accounts_do_not_populate_genesis_alloc() {
         for key in ["eip8253Accounts", "zeroNonceStorageAccounts"] {
             let genesis: Genesis = serde_json::from_value(json!({
-                "config": {(key): EIP8253_MAINNET_ACCOUNTS},
+                "config": {(key): alloy_eips::eip8253::MAINNET_ACCOUNTS},
                 "alloc": {}
             }))
             .unwrap();
-            assert_eq!(genesis.config.eip8253_accounts, Some(EIP8253_MAINNET_ACCOUNTS.to_vec()));
+            assert_eq!(
+                genesis.config.zero_nonce_storage_accounts,
+                Some(alloy_eips::eip8253::MAINNET_ACCOUNTS.to_vec())
+            );
             assert!(genesis.alloc.is_empty());
         }
-        let unique =
-            EIP8253_MAINNET_ACCOUNTS.into_iter().collect::<alloc::collections::BTreeSet<_>>();
+        let unique = alloy_eips::eip8253::MAINNET_ACCOUNTS
+            .into_iter()
+            .collect::<alloc::collections::BTreeSet<_>>();
         assert_eq!(unique.len(), 28);
     }
 
     #[test]
-    fn eip8253_accounts_reject_duplicate_json_fields() {
+    fn zero_nonce_storage_accounts_reject_duplicate_json_fields() {
         let error = serde_json::from_value::<ChainConfig>(json!({
             "eip8253Accounts": [],
-            "zeroNonceStorageAccounts": [EIP8253_MAINNET_ACCOUNTS[0]],
+            "zeroNonceStorageAccounts": [alloy_eips::eip8253::MAINNET_ACCOUNTS[0]],
         }))
         .unwrap_err();
-        assert_eq!(error.to_string(), "duplicate field `eip8253Accounts`");
+        assert_eq!(error.to_string(), "duplicate field `zeroNonceStorageAccounts`");
     }
 
     #[test]

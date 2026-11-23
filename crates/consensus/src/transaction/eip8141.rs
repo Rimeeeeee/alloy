@@ -20,7 +20,7 @@ use alloy_eips::{
     },
     eip8250::{nonce_calldata, validate_nonce_keys, KEYED_NONCE_ACCESS_COST},
     eip8288::{
-        validate_dependency_frame, Dependency, DependencyError, DependencyIter, DEPENDENCY_BYTES,
+        DependencyValidationError, SignatureDependencies, SignatureDependency, DEPENDENCY_BYTES,
         LEANSTARK_VERIFICATION_GAS,
     },
     Decodable2718, Encodable2718, Typed2718,
@@ -1313,9 +1313,11 @@ impl TxEip8141 {
     ///
     /// This validates dependency frames, but does not replace full transaction validation.
     /// Frame bytes remain unchanged, including the zero-message sentinel used in signing.
-    pub fn dependencies(&self) -> Result<Vec<Dependency>, DependencyError> {
+    pub fn signature_dependencies(
+        &self,
+    ) -> Result<Vec<SignatureDependency>, DependencyValidationError> {
         if self.frames.len() > MAX_FRAMES {
-            return Err(DependencyError::FrameCount);
+            return Err(DependencyValidationError::FrameCount);
         }
         let mut dependencies = Vec::new();
         let mut signature_hash = None;
@@ -1323,7 +1325,7 @@ impl TxEip8141 {
             if frame.mode != FrameMode::DependencyVerify {
                 continue;
             }
-            for dependency in DependencyIter::from_frame(
+            for dependency in SignatureDependencies::from_frame(
                 frame,
                 index > 0 && self.frames[index - 1].is_atomic_batch(),
             )? {
@@ -1333,6 +1335,25 @@ impl TxEip8141 {
                         .resolve(*signature_hash.get_or_insert_with(|| self.signature_hash()));
                 }
                 dependencies.push(dependency);
+            }
+        }
+        dependencies.sort_unstable();
+        dependencies.dedup();
+        Ok(dependencies)
+    }
+
+    /// Collects the sorted, distinct dependencies declared by frame transactions in a block or
+    /// wrapper.
+    ///
+    /// Non-frame transactions contribute no dependencies. This checks declarations, not signatures,
+    /// proof coverage, or the caller's resource limits.
+    pub fn collect_signature_dependencies<'a, T: Transaction + 'a>(
+        transactions: impl IntoIterator<Item = &'a T>,
+    ) -> Result<Vec<SignatureDependency>, DependencyValidationError> {
+        let mut dependencies = Vec::new();
+        for transaction in transactions {
+            if let Some(frame) = transaction.frame_transaction() {
+                dependencies.extend(frame.signature_dependencies()?);
             }
         }
         dependencies.sort_unstable();
@@ -1422,10 +1443,11 @@ impl TxEip8141Ref<'_> {
         let mut expiry_verifiers = 0u8;
         for (index, frame) in self.frames.iter().enumerate() {
             if frame.mode == FrameMode::DependencyVerify {
-                validate_dependency_frame(
+                SignatureDependencies::from_frame(
                     frame,
                     index > 0 && self.frames[index - 1].is_atomic_batch(),
                 )
+                .and_then(SignatureDependencies::validate)
                 .map_err(|_| "invalid EIP-8288 dependency frame")?;
             }
             if frame.has_reserved_flags() {
@@ -1945,10 +1967,13 @@ pub(super) mod serde_bincode_compat {
 mod tests {
     use super::*;
     use crate::{EthereumTxEnvelope, TxEip4844};
-    use alloy_eips::eip8141::{
-        constants::{ATOMIC_BATCH_FLAG, EXPIRY_DATA_LENGTH, EXPIRY_VERIFIER},
-        ApprovalScope, FrameAddress, FrameLimits, FrameMode, SignatureMessage, SignatureScheme,
-        TransactionFees,
+    use alloy_eips::{
+        eip8141::{
+            constants::{ATOMIC_BATCH_FLAG, EXPIRY_DATA_LENGTH, EXPIRY_VERIFIER},
+            ApprovalScope, FrameAddress, FrameLimits, FrameMode, SignatureMessage, SignatureScheme,
+            TransactionFees,
+        },
+        eip8288::{LEANSPHINCS_SCHEME, LEANSPHINCS_VERIFICATION_GAS},
     };
     use alloy_primitives::{Address, Bytes, B256, U256};
 
@@ -2568,8 +2593,8 @@ mod tests {
 
     #[test]
     fn dependency_resolution_preserves_signing_bytes_and_charges_duplicates() {
-        let declaration = Dependency {
-            scheme: alloy_eips::eip8288::LEANSPHINCS_SCHEME,
+        let declaration = SignatureDependency {
+            scheme: LEANSPHINCS_SCHEME,
             data_hash: B256::ZERO,
             verification_key_hash: B256::repeat_byte(7),
         };
@@ -2583,20 +2608,20 @@ mod tests {
         let encoded = alloy_rlp::encode(&tx);
         let signature_hash = tx.signature_hash();
         assert_eq!(tx.validate(), Ok(()));
-        assert_eq!(tx.dependencies(), Ok(vec![declaration.resolve(signature_hash)]));
+        assert_eq!(tx.signature_dependencies(), Ok(vec![declaration.resolve(signature_hash)]));
         assert_eq!(alloy_rlp::encode(&tx), encoded);
         assert_eq!(tx.signature_hash(), signature_hash);
         assert_eq!(tx.recursive_stark_gas(), 60_000);
         assert_eq!(tx.frames[0].data, declaration.encode().repeat(2));
         tx.chain_id += 1;
-        assert_ne!(tx.dependencies().unwrap()[0].data_hash, signature_hash);
-        assert_eq!(tx.dependencies().unwrap()[0].data_hash, tx.signature_hash());
+        assert_ne!(tx.signature_dependencies().unwrap()[0].data_hash, signature_hash);
+        assert_eq!(tx.signature_dependencies().unwrap()[0].data_hash, tx.signature_hash());
     }
 
     #[test]
     fn dependency_gas_agrees_with_borrowed_transaction_and_keeps_calldata_cost() {
-        let declaration = Dependency {
-            scheme: alloy_eips::eip8288::LEANSPHINCS_SCHEME,
+        let declaration = SignatureDependency {
+            scheme: LEANSPHINCS_SCHEME,
             data_hash: B256::repeat_byte(1),
             verification_key_hash: B256::repeat_byte(2),
         };
@@ -2620,8 +2645,8 @@ mod tests {
 
     #[test]
     fn dependency_sorting_and_static_validation() {
-        let mut first = Dependency {
-            scheme: alloy_eips::eip8288::LEANSPHINCS_SCHEME,
+        let mut first = SignatureDependency {
+            scheme: LEANSPHINCS_SCHEME,
             data_hash: B256::repeat_byte(2),
             verification_key_hash: B256::repeat_byte(1),
         };
@@ -2637,13 +2662,39 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert_eq!(tx.dependencies().unwrap()[0], first);
+        assert_eq!(tx.signature_dependencies().unwrap()[0], first);
         tx.frames[0].target = Address::ZERO.into();
         assert_eq!(tx.validate(), Err("invalid EIP-8288 dependency frame"));
-        assert_eq!(tx.dependencies(), Err(DependencyError::FrameFields));
+        assert_eq!(tx.signature_dependencies(), Err(DependencyValidationError::FrameFields));
         tx.frames[0].target = Default::default();
         tx.frames.insert(0, Frame { flags: 4, ..Default::default() });
         assert_eq!(tx.validate(), Err("invalid EIP-8288 dependency frame"));
-        assert_eq!(tx.dependencies(), Err(DependencyError::AtomicBatch));
+        assert_eq!(tx.signature_dependencies(), Err(DependencyValidationError::AtomicBatch));
+    }
+
+    #[test]
+    fn block_signature_dependencies_deduplicate_and_validate_every_transaction() {
+        let dependency = SignatureDependency {
+            scheme: LEANSPHINCS_SCHEME,
+            data_hash: B256::repeat_byte(1),
+            verification_key_hash: B256::repeat_byte(2),
+        };
+        let mut tx = TxEip8141 {
+            frames: vec![Frame {
+                mode: FrameMode::DependencyVerify,
+                limits: FrameLimits { execution: LEANSPHINCS_VERIFICATION_GAS, state: 0 },
+                data: Bytes::copy_from_slice(&dependency.encode()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(TxEip8141::collect_signature_dependencies([&tx, &tx]), Ok(vec![dependency]));
+        let good = tx.clone();
+        tx.frames[0].flags = 1;
+        assert_eq!(
+            TxEip8141::collect_signature_dependencies([&good, &tx]),
+            Err(DependencyValidationError::FrameFields)
+        );
+        assert_eq!(TxEip8141::collect_signature_dependencies([&TxEip8141::default()]), Ok(vec![]));
     }
 }

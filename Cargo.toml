@@ -90,7 +90,7 @@ alloy-eip2124 = { version = "0.2.0", default-features = false }
 alloy-eip2930 = { version = "0.2.3", default-features = false }
 alloy-eip7702 = { version = "0.6.3", default-features = false }
 alloy-eip7928 = { version = "0.4", git = "https://github.com/Rimeeeeee/eips", rev = "eb1b963d6386c618bdb10b4216c801466f22b4eb", default-features = false }
-alloy-eip8141 = { git = "https://github.com/Rimeeeeee/eips", rev = "d6307d816e626e0d67120d27c9bfa4a942b25961", version = "0.2", default-features = false }
+alloy-eip8141 = { git = "https://github.com/Rimeeeeee/eips", rev = "5cd5ac55ba2ede7c9c40ab94717332ff7dbb00d0", version = "0.2", default-features = false }
 
 # hardforks
 alloy-hardforks = "0.2.0"
@@ -102,6 +102,7 @@ tree_hash = "0.12"
 tree_hash_derive = "0.12"
 
 # crypto
+lean_vm = { git = "https://github.com/Rimeeeeee/leanVM", rev = "84780fb42667bc288c0e567c125b7e10479fb568", default-features = false, features = ["experimental_prover"] }
 c-kzg = { version = "2.1.1", default-features = false }
 elliptic-curve = { version = "0.13", default-features = false }
 k256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
