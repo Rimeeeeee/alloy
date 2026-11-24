@@ -159,6 +159,12 @@ pub struct Header {
         )
     )]
     pub slot_number: Option<u64>,
+    /// Keccak-256 hash of the separately stored EIP-8288 dependency proof.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub dependency_proof_hash: Option<B256>,
+    /// Digest of the dependencies declared by this block's transactions (EIP-8288).
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub block_deps_hash: Option<B256>,
 }
 
 impl AsRef<Self> for Header {
@@ -193,6 +199,8 @@ impl Default for Header {
             requests_hash: None,
             block_access_list_hash: None,
             slot_number: None,
+            dependency_proof_hash: None,
+            block_deps_hash: None,
         }
     }
 }
@@ -335,6 +343,12 @@ impl Header {
             length += slot_number.length();
         }
 
+        if let Some(hash) = self.dependency_proof_hash {
+            length += hash.length();
+        }
+        if let Some(hash) = self.block_deps_hash {
+            length += hash.length();
+        }
         length
     }
 
@@ -449,6 +463,12 @@ impl Encodable for Header {
         if let Some(ref slot_number) = self.slot_number {
             slot_number.encode(out);
         }
+        if let Some(ref hash) = self.dependency_proof_hash {
+            hash.encode(out);
+        }
+        if let Some(ref hash) = self.block_deps_hash {
+            hash.encode(out);
+        }
     }
 
     fn length(&self) -> usize {
@@ -490,6 +510,8 @@ impl Decodable for Header {
             requests_hash: None,
             block_access_list_hash: None,
             slot_number: None,
+            dependency_proof_hash: None,
+            block_deps_hash: None,
         };
         if started_len - buf.len() < rlp_head.payload_length {
             this.base_fee_per_gas = Some(u64::decode(buf)?);
@@ -529,6 +551,13 @@ impl Decodable for Header {
             this.slot_number = Some(u64::decode(buf)?);
         }
 
+        // EIP-8288 appends the proof commitment followed by the dependency digest.
+        if started_len - buf.len() < rlp_head.payload_length {
+            this.dependency_proof_hash = Some(B256::decode(buf)?);
+        }
+        if started_len - buf.len() < rlp_head.payload_length {
+            this.block_deps_hash = Some(B256::decode(buf)?);
+        }
         let consumed = started_len - buf.len();
         if consumed != rlp_head.payload_length {
             return Err(alloy_rlp::Error::ListLengthMismatch {
@@ -573,6 +602,8 @@ impl<'a> arbitrary::Arbitrary<'a> for Header {
             // Amsterdam fields do not yet participate in the hardfork-aware arbitrary model.
             block_access_list_hash: None,
             slot_number: None,
+            dependency_proof_hash: None,
+            block_deps_hash: None,
         })
     }
 }
@@ -694,6 +725,16 @@ pub trait BlockHeader {
     ///
     /// [EIP-7843]: https://eips.ethereum.org/EIPS/eip-7843
     fn slot_number(&self) -> Option<u64>;
+
+    /// Returns the commitment to the EIP-8288 dependency proof, if present.
+    fn dependency_proof_hash(&self) -> Option<B256> {
+        None
+    }
+
+    /// Returns the EIP-8288 dependency digest, if present.
+    fn block_deps_hash(&self) -> Option<B256> {
+        None
+    }
 
     /// Retrieves the block's extra data field
     fn extra_data(&self) -> &Bytes;
@@ -934,6 +975,14 @@ impl BlockHeader for Header {
         self.slot_number
     }
 
+    fn dependency_proof_hash(&self) -> Option<B256> {
+        self.dependency_proof_hash
+    }
+
+    fn block_deps_hash(&self) -> Option<B256> {
+        self.block_deps_hash
+    }
+
     fn extra_data(&self) -> &Bytes {
         &self.extra_data
     }
@@ -1029,6 +1078,14 @@ impl<T: BlockHeader> BlockHeader for alloy_serde::WithOtherFields<T> {
         self.inner.slot_number()
     }
 
+    fn dependency_proof_hash(&self) -> Option<B256> {
+        self.inner.dependency_proof_hash()
+    }
+
+    fn block_deps_hash(&self) -> Option<B256> {
+        self.inner.block_deps_hash()
+    }
+
     fn extra_data(&self) -> &Bytes {
         self.inner.extra_data()
     }
@@ -1093,6 +1150,10 @@ pub(crate) mod serde_bincode_compat {
         block_access_list_hash: Option<B256>,
         #[serde(default)]
         slot_number: Option<u64>,
+        #[serde(default)]
+        dependency_proof_hash: Option<B256>,
+        #[serde(default)]
+        block_deps_hash: Option<B256>,
         extra_data: Cow<'a, Bytes>,
     }
 
@@ -1121,6 +1182,8 @@ pub(crate) mod serde_bincode_compat {
                 requests_hash: value.requests_hash,
                 block_access_list_hash: value.block_access_list_hash,
                 slot_number: value.slot_number,
+                dependency_proof_hash: value.dependency_proof_hash,
+                block_deps_hash: value.block_deps_hash,
                 extra_data: Cow::Borrowed(&value.extra_data),
             }
         }
@@ -1151,6 +1214,8 @@ pub(crate) mod serde_bincode_compat {
                 requests_hash: value.requests_hash,
                 block_access_list_hash: value.block_access_list_hash,
                 slot_number: value.slot_number,
+                dependency_proof_hash: value.dependency_proof_hash,
+                block_deps_hash: value.block_deps_hash,
                 extra_data: value.extra_data.into_owned(),
             }
         }
@@ -1182,6 +1247,28 @@ pub(crate) mod serde_bincode_compat {
             Header,
             "serde_bincode_compat::Header"
         );
+
+        #[test]
+        fn eip8288_bincode_commitments() {
+            #[serde_with::serde_as]
+            #[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+            struct Data {
+                #[serde_as(as = "serde_bincode_compat::Header")]
+                header: Header,
+            }
+            let data = Data {
+                header: Header {
+                    dependency_proof_hash: Some(alloy_primitives::B256::repeat_byte(1)),
+                    block_deps_hash: Some(alloy_primitives::B256::repeat_byte(2)),
+                    ..Default::default()
+                },
+            };
+            let bytes = bincode::serde::encode_to_vec(&data, bincode::config::legacy()).unwrap();
+            let (decoded, consumed): (Data, _) =
+                bincode::serde::decode_from_slice(&bytes, bincode::config::legacy()).unwrap();
+            assert_eq!(decoded, data);
+            assert_eq!(consumed, bytes.len());
+        }
     }
 }
 
@@ -1211,6 +1298,41 @@ mod tests {
             parent.validate_gas_limit_with_bound_divisor(2_000, 1_098, 10),
             Err(GasLimitMismatch { got: 1_098, expected: 1_099 })
         );
+    }
+
+    #[test]
+    fn eip8288_header_commitments() {
+        let mut header = Header {
+            base_fee_per_gas: Some(1),
+            withdrawals_root: Some(B256::ZERO),
+            blob_gas_used: Some(0),
+            excess_blob_gas: Some(0),
+            parent_beacon_block_root: Some(B256::ZERO),
+            requests_hash: Some(B256::ZERO),
+            block_access_list_hash: Some(B256::ZERO),
+            slot_number: Some(1),
+            ..Default::default()
+        };
+        let before = header.hash_slow();
+        header.dependency_proof_hash = Some(B256::repeat_byte(0x11));
+        header.block_deps_hash = Some(B256::repeat_byte(0x22));
+        let encoded = alloy_rlp::encode(&header);
+        assert_eq!(encoded.len(), header.length());
+        let mut suffix = alloy_rlp::encode(header.dependency_proof_hash.unwrap());
+        suffix.extend(alloy_rlp::encode(header.block_deps_hash.unwrap()));
+        assert!(encoded.ends_with(&suffix));
+        assert_eq!(Header::decode(&mut encoded.as_slice()).unwrap(), header);
+        assert_ne!(before, header.hash_slow());
+        let hash = header.hash_slow();
+        header.block_deps_hash = Some(B256::repeat_byte(0x33));
+        assert_ne!(hash, header.hash_slow());
+        #[cfg(feature = "serde")]
+        {
+            let json = serde_json::to_value(&header).unwrap();
+            assert!(json.get("dependencyProofHash").is_some());
+            assert!(json.get("blockDepsHash").is_some());
+            assert_eq!(serde_json::from_value::<Header>(json).unwrap(), header);
+        }
     }
 
     #[test]

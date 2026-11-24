@@ -929,6 +929,8 @@ impl ExecutionPayloadV1 {
             requests_hash: None,
             block_access_list_hash: None,
             slot_number: None,
+            dependency_proof_hash: None,
+            block_deps_hash: None,
             extra_data: self.extra_data,
             // Defaults
             ommers_hash: EMPTY_OMMER_ROOT_HASH,
@@ -1542,6 +1544,77 @@ pub struct ExecutionPayloadV4 {
     /// [EIP-7843]: https://eips.ethereum.org/EIPS/eip-7843
     #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
     pub slot_number: u64,
+}
+
+/// Execution payload V5 for EIP-8288, extending V4 with a required dependency proof.
+///
+/// The proof belongs to neither the header nor the body. Execution clients derive its hash and
+/// the block dependency digest before validating the block hash. Proof size and validity are
+/// checked by the execution client, rather than JSON parameter decoding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+#[cfg_attr(any(test, feature = "arbitrary"), derive(arbitrary::Arbitrary))]
+pub struct ExecutionPayloadV5 {
+    /// Inner Amsterdam payload.
+    #[cfg_attr(feature = "serde", serde(flatten))]
+    pub payload_inner: ExecutionPayloadV4,
+    /// Serialized dependency proof. Required even when empty (`"0x"`).
+    pub dependency_proof: Bytes,
+}
+
+impl ExecutionPayloadV5 {
+    /// Returns the header commitment to the serialized dependency proof.
+    pub fn dependency_proof_hash(&self) -> B256 {
+        keccak256(&self.dependency_proof)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for ExecutionPayloadV5 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        payload_serde_helper! {
+            #[serde(deny_unknown_fields)]
+            struct Helper {
+                withdrawals: Vec<Withdrawal>,
+                #[serde(with = "alloy_serde::quantity")]
+                blob_gas_used: u64,
+                #[serde(with = "alloy_serde::quantity")]
+                excess_blob_gas: u64,
+                block_access_list: Bytes,
+                #[serde(with = "alloy_serde::quantity")]
+                slot_number: u64,
+                dependency_proof: Bytes,
+            }
+        }
+
+        let (
+            payload_inner,
+            (
+                withdrawals,
+                blob_gas_used,
+                excess_blob_gas,
+                block_access_list,
+                slot_number,
+                dependency_proof,
+            ),
+        ) = Helper::deserialize(strict::StrictFields(deserializer))?.into_parts();
+        Ok(Self {
+            payload_inner: ExecutionPayloadV4 {
+                payload_inner: ExecutionPayloadV3 {
+                    payload_inner: ExecutionPayloadV2 { payload_inner, withdrawals },
+                    blob_gas_used,
+                    excess_blob_gas,
+                },
+                block_access_list,
+                slot_number,
+            },
+            dependency_proof,
+        })
+    }
 }
 
 #[cfg(feature = "serde")]

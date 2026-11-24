@@ -16,6 +16,8 @@ mod prague;
 pub use prague::*;
 mod bogota;
 pub use bogota::*;
+mod eip8288;
+pub use eip8288::*;
 mod sidecar;
 pub use sidecar::*;
 
@@ -60,6 +62,7 @@ pub const CAPABILITIES: &[&str] = &[
     "engine_forkchoiceUpdatedV1",
     "engine_forkchoiceUpdatedV2",
     "engine_forkchoiceUpdatedV3",
+    "engine_forkchoiceUpdatedV6",
     "engine_exchangeTransitionConfigurationV1",
     "engine_getClientVersionV1",
     "engine_getPayloadV1",
@@ -68,13 +71,18 @@ pub const CAPABILITIES: &[&str] = &[
     "engine_getPayloadV4",
     "engine_getPayloadV5",
     "engine_getPayloadV6",
+    "engine_getPayloadV7",
     "engine_newPayloadV1",
     "engine_newPayloadV2",
     "engine_newPayloadV3",
     "engine_newPayloadV4",
     "engine_newPayloadV5",
+    "engine_newPayloadV7",
     "engine_getPayloadBodiesByHashV1",
     "engine_getPayloadBodiesByRangeV1",
     "engine_getPayloadBodiesByHashV2",
+    "engine_getPayloadBodiesByHashV3",
     "engine_getPayloadBodiesByRangeV2",
+    "engine_getPayloadBodiesByRangeV3",
+    "engine_getInclusionListV2",
 ];

@@ -606,6 +606,14 @@ impl<H: BlockHeader> BlockHeader for Header<H> {
         self.inner.slot_number()
     }
 
+    fn dependency_proof_hash(&self) -> Option<B256> {
+        self.inner.dependency_proof_hash()
+    }
+
+    fn block_deps_hash(&self) -> Option<B256> {
+        self.inner.block_deps_hash()
+    }
+
     fn extra_data(&self) -> &Bytes {
         self.inner.extra_data()
     }
