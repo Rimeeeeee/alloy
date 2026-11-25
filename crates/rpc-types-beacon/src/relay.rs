@@ -820,7 +820,6 @@ mod tests {
                 payload_inner: bid_submission_v4.execution_payload.clone(),
                 block_access_list: alloy_primitives::Bytes::from(vec![0xaa, 0xbb, 0xcc]),
                 slot_number: 6,
-                recursive_stark: None,
             },
             blobs_bundle: alloy_rpc_types_engine::BlobsBundleV2 {
                 commitments: bid_submission_v4.blobs_bundle.commitments.clone(),

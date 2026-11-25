@@ -5,7 +5,6 @@ mod strict;
 
 use crate::{CancunPayloadFields, ExecutionPayloadSidecar, PayloadError, PraguePayloadFields};
 use alloc::{
-    boxed::Box,
     string::{String, ToString},
     vec::Vec,
 };
@@ -25,7 +24,7 @@ use alloy_eips::{
     eip7685::Requests,
     eip7840::BlobParams,
     eip7928::EMPTY_BLOCK_ACCESS_LIST_HASH,
-    eip8288::RecursiveStark,
+    eip8288::{dependency_digest, MAX_DEPENDENCY_PROOF_BYTES},
     BlockNumHash,
 };
 use alloy_primitives::{keccak256, Address, Bloom, Bytes, Sealable, Sealed, B256, B64, U256};
@@ -116,17 +115,19 @@ impl From<B64> for PayloadId {
 pub struct PayloadExtras {
     /// The block access list bytes.
     pub bal: Option<Bytes>,
+    /// Separately stored EIP-8288 proof, including an available empty proof.
+    pub dependency_proof: Option<Bytes>,
 }
 
 impl From<Option<Bytes>> for PayloadExtras {
     fn from(bal: Option<Bytes>) -> Self {
-        Self { bal }
+        Self { bal, dependency_proof: None }
     }
 }
 
 impl From<Bytes> for PayloadExtras {
     fn from(bal: Bytes) -> Self {
-        Self { bal: Some(bal) }
+        Self { bal: Some(bal), dependency_proof: None }
     }
 }
 
@@ -931,7 +932,8 @@ impl ExecutionPayloadV1 {
             requests_hash: None,
             block_access_list_hash: None,
             slot_number: None,
-            recursive_stark: None,
+            dependency_proof_hash: None,
+            block_deps_hash: None,
             extra_data: self.extra_data,
             // Defaults
             ommers_hash: EMPTY_OMMER_ROOT_HASH,
@@ -1545,9 +1547,107 @@ pub struct ExecutionPayloadV4 {
     /// [EIP-7843]: https://eips.ethereum.org/EIPS/eip-7843
     #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
     pub slot_number: u64,
-    /// Experimental EIP-8288 header entry; absent on ordinary Amsterdam/Bogota payloads.
-    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
-    pub recursive_stark: Option<Box<RecursiveStark>>,
+}
+
+/// Execution payload V5 for EIP-8288, extending V4 with a required dependency proof.
+///
+/// The proof belongs to neither the header nor the body. Execution clients derive its hash and
+/// the block dependency digest before validating the block hash. Proof size and validity are
+/// checked by the execution client, rather than JSON parameter decoding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+#[cfg_attr(any(test, feature = "arbitrary"), derive(arbitrary::Arbitrary))]
+pub struct ExecutionPayloadV5 {
+    /// Inner Amsterdam payload.
+    #[cfg_attr(feature = "serde", serde(flatten))]
+    pub payload_inner: ExecutionPayloadV4,
+    /// Serialized dependency proof. Required even when empty (`"0x"`).
+    pub dependency_proof: Bytes,
+}
+
+impl ExecutionPayloadV5 {
+    /// Returns the header commitment to the serialized dependency proof.
+    pub fn dependency_proof_hash(&self) -> B256 {
+        keccak256(&self.dependency_proof)
+    }
+}
+
+impl ExecutionPayloadV5 {
+    /// Builds the execution header commitments while preserving raw transaction bytes.
+    /// The caller must verify the proof and compare the resulting header hash with `blockHash`.
+    pub fn into_block_raw_with_transactions_root_opt(
+        self,
+        transactions_root: Option<B256>,
+    ) -> Result<Block<Bytes>, PayloadError> {
+        if self.dependency_proof.len() > MAX_DEPENDENCY_PROOF_BYTES {
+            return Err(PayloadError::DependencyProofTooLarge(self.dependency_proof.len()));
+        }
+        let proof_hash = self.dependency_proof_hash();
+        let mut block =
+            self.payload_inner.into_block_raw_with_transactions_root_opt(transactions_root)?;
+        let frames = block
+            .body
+            .transactions
+            .iter()
+            .filter(|raw| raw.first() == Some(&alloy_eips::eip2718::EIP8141_TX_TYPE_ID))
+            .map(|raw| {
+                alloy_consensus::TxEip8141::decode_2718_exact(raw).map_err(alloy_rlp::Error::from)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let dependencies = alloy_consensus::TxEip8141::collect_signature_dependencies(&frames)
+            .map_err(PayloadError::InvalidDependencies)?;
+        block.header.dependency_proof_hash = Some(proof_hash);
+        block.header.block_deps_hash = Some(dependency_digest(&dependencies));
+        Ok(block)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for ExecutionPayloadV5 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        payload_serde_helper! {
+            #[serde(deny_unknown_fields)]
+            struct Helper {
+                withdrawals: Vec<Withdrawal>,
+                #[serde(with = "alloy_serde::quantity")]
+                blob_gas_used: u64,
+                #[serde(with = "alloy_serde::quantity")]
+                excess_blob_gas: u64,
+                block_access_list: Bytes,
+                #[serde(with = "alloy_serde::quantity")]
+                slot_number: u64,
+                dependency_proof: Bytes,
+            }
+        }
+
+        let (
+            payload_inner,
+            (
+                withdrawals,
+                blob_gas_used,
+                excess_blob_gas,
+                block_access_list,
+                slot_number,
+                dependency_proof,
+            ),
+        ) = Helper::deserialize(strict::StrictFields(deserializer))?.into_parts();
+        Ok(Self {
+            payload_inner: ExecutionPayloadV4 {
+                payload_inner: ExecutionPayloadV3 {
+                    payload_inner: ExecutionPayloadV2 { payload_inner, withdrawals },
+                    blob_gas_used,
+                    excess_blob_gas,
+                },
+                block_access_list,
+                slot_number,
+            },
+            dependency_proof,
+        })
+    }
 }
 
 #[cfg(feature = "serde")]
@@ -1567,21 +1667,12 @@ impl<'de> serde::Deserialize<'de> for ExecutionPayloadV4 {
                 block_access_list: Bytes,
                 #[serde(with = "alloy_serde::quantity")]
                 slot_number: u64,
-                #[serde(default)]
-                recursive_stark: Option<Box<RecursiveStark>>,
             }
         }
 
         let (
             payload_inner,
-            (
-                withdrawals,
-                blob_gas_used,
-                excess_blob_gas,
-                block_access_list,
-                slot_number,
-                recursive_stark,
-            ),
+            (withdrawals, blob_gas_used, excess_blob_gas, block_access_list, slot_number),
         ) = Helper::deserialize(strict::StrictFields(deserializer))?.into_parts();
         Ok(Self {
             payload_inner: ExecutionPayloadV3 {
@@ -1591,15 +1682,9 @@ impl<'de> serde::Deserialize<'de> for ExecutionPayloadV4 {
             },
             block_access_list,
             slot_number,
-            recursive_stark,
         })
     }
 }
-
-#[cfg(feature = "ssz")]
-const PAYLOAD_EXTRA_DATA_OFFSET_POSITION: usize = 436;
-#[cfg(feature = "ssz")]
-const PAYLOAD_V4_PROOF_FIXED_LENGTH: u32 = 544;
 
 #[cfg(feature = "ssz")]
 impl ssz::Decode for ExecutionPayloadV4 {
@@ -1608,13 +1693,6 @@ impl ssz::Decode for ExecutionPayloadV4 {
     }
 
     fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, ssz::DecodeError> {
-        // The devnet extension adds one final variable field; ordinary V4 retains its old schema.
-        let has_proof = bytes
-            .get(
-                PAYLOAD_EXTRA_DATA_OFFSET_POSITION
-                    ..PAYLOAD_EXTRA_DATA_OFFSET_POSITION + ssz::BYTES_PER_LENGTH_OFFSET,
-            )
-            .is_some_and(|offset| offset == PAYLOAD_V4_PROOF_FIXED_LENGTH.to_le_bytes());
         let mut builder = ssz::SszDecoderBuilder::new(bytes);
 
         builder.register_type::<B256>()?;
@@ -1636,10 +1714,6 @@ impl ssz::Decode for ExecutionPayloadV4 {
         builder.register_type::<u64>()?;
         builder.register_type::<Bytes>()?;
         builder.register_type::<u64>()?;
-
-        if has_proof {
-            builder.register_type::<Bytes>()?;
-        }
 
         let mut decoder = builder.build()?;
 
@@ -1669,15 +1743,6 @@ impl ssz::Decode for ExecutionPayloadV4 {
             },
             block_access_list: decoder.decode_next()?,
             slot_number: decoder.decode_next()?,
-            recursive_stark: if has_proof {
-                let proof: Bytes = decoder.decode_next()?;
-                Some(Box::new(
-                    alloy_rlp::decode_exact(&proof)
-                        .map_err(|error| ssz::DecodeError::BytesInvalid(error.to_string()))?,
-                ))
-            } else {
-                None
-            },
         })
     }
 }
@@ -1694,8 +1759,7 @@ impl ssz::Encode for ExecutionPayloadV4 {
             + <Bloom as ssz::Encode>::ssz_fixed_len()
             + <u64 as ssz::Encode>::ssz_fixed_len() * 7 // includes slot_number
             + <U256 as ssz::Encode>::ssz_fixed_len()
-            + ssz::BYTES_PER_LENGTH_OFFSET * 4
-            + self.recursive_stark.as_ref().map_or(0, |_| ssz::BYTES_PER_LENGTH_OFFSET);
+            + ssz::BYTES_PER_LENGTH_OFFSET * 4;
 
         let mut encoder = ssz::SszEncoder::container(buf, offset);
 
@@ -1719,10 +1783,6 @@ impl ssz::Encode for ExecutionPayloadV4 {
         encoder.append(&self.block_access_list);
         encoder.append(&self.slot_number);
 
-        if let Some(proof) = &self.recursive_stark {
-            encoder.append(&Bytes::from(alloy_rlp::encode(proof.as_ref())));
-        }
-
         encoder.finalize();
     }
 
@@ -1731,9 +1791,119 @@ impl ssz::Encode for ExecutionPayloadV4 {
             + ssz::BYTES_PER_LENGTH_OFFSET
             + self.block_access_list.len()
             + <u64 as ssz::Encode>::ssz_fixed_len()
-            + self.recursive_stark.as_ref().map_or(0, |proof| {
-                ssz::BYTES_PER_LENGTH_OFFSET + alloy_rlp::Encodable::length(proof.as_ref())
-            })
+    }
+}
+
+#[cfg(feature = "ssz")]
+impl ssz::Decode for ExecutionPayloadV5 {
+    fn is_ssz_fixed_len() -> bool {
+        false
+    }
+
+    fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, ssz::DecodeError> {
+        let mut builder = ssz::SszDecoderBuilder::new(bytes);
+
+        builder.register_type::<B256>()?;
+        builder.register_type::<Address>()?;
+        builder.register_type::<B256>()?;
+        builder.register_type::<B256>()?;
+        builder.register_type::<Bloom>()?;
+        builder.register_type::<B256>()?;
+        builder.register_type::<u64>()?;
+        builder.register_type::<u64>()?;
+        builder.register_type::<u64>()?;
+        builder.register_type::<u64>()?;
+        builder.register_type::<Bytes>()?;
+        builder.register_type::<U256>()?;
+        builder.register_type::<B256>()?;
+        builder.register_type::<Vec<Bytes>>()?;
+        builder.register_type::<Vec<Withdrawal>>()?;
+        builder.register_type::<u64>()?;
+        builder.register_type::<u64>()?;
+        builder.register_type::<Bytes>()?;
+        builder.register_type::<u64>()?;
+        builder.register_type::<Bytes>()?;
+
+        let mut decoder = builder.build()?;
+
+        Ok(Self {
+            payload_inner: ExecutionPayloadV4 {
+                payload_inner: ExecutionPayloadV3 {
+                    payload_inner: ExecutionPayloadV2 {
+                        payload_inner: ExecutionPayloadV1 {
+                            parent_hash: decoder.decode_next()?,
+                            fee_recipient: decoder.decode_next()?,
+                            state_root: decoder.decode_next()?,
+                            receipts_root: decoder.decode_next()?,
+                            logs_bloom: decoder.decode_next()?,
+                            prev_randao: decoder.decode_next()?,
+                            block_number: decoder.decode_next()?,
+                            gas_limit: decoder.decode_next()?,
+                            gas_used: decoder.decode_next()?,
+                            timestamp: decoder.decode_next()?,
+                            extra_data: decoder.decode_next()?,
+                            base_fee_per_gas: decoder.decode_next()?,
+                            block_hash: decoder.decode_next()?,
+                            transactions: decoder.decode_next()?,
+                        },
+                        withdrawals: decoder.decode_next()?,
+                    },
+                    blob_gas_used: decoder.decode_next()?,
+                    excess_blob_gas: decoder.decode_next()?,
+                },
+                block_access_list: decoder.decode_next()?,
+                slot_number: decoder.decode_next()?,
+            },
+            dependency_proof: decoder.decode_next()?,
+        })
+    }
+}
+
+#[cfg(feature = "ssz")]
+impl ssz::Encode for ExecutionPayloadV5 {
+    fn is_ssz_fixed_len() -> bool {
+        false
+    }
+
+    fn ssz_append(&self, buf: &mut Vec<u8>) {
+        let offset = <B256 as ssz::Encode>::ssz_fixed_len() * 5
+            + <Address as ssz::Encode>::ssz_fixed_len()
+            + <Bloom as ssz::Encode>::ssz_fixed_len()
+            + <u64 as ssz::Encode>::ssz_fixed_len() * 7 // includes slot_number
+            + <U256 as ssz::Encode>::ssz_fixed_len()
+            + ssz::BYTES_PER_LENGTH_OFFSET * 5;
+
+        let mut encoder = ssz::SszEncoder::container(buf, offset);
+
+        encoder.append(&self.payload_inner.payload_inner.payload_inner.payload_inner.parent_hash);
+        encoder.append(&self.payload_inner.payload_inner.payload_inner.payload_inner.fee_recipient);
+        encoder.append(&self.payload_inner.payload_inner.payload_inner.payload_inner.state_root);
+        encoder.append(&self.payload_inner.payload_inner.payload_inner.payload_inner.receipts_root);
+        encoder.append(&self.payload_inner.payload_inner.payload_inner.payload_inner.logs_bloom);
+        encoder.append(&self.payload_inner.payload_inner.payload_inner.payload_inner.prev_randao);
+        encoder.append(&self.payload_inner.payload_inner.payload_inner.payload_inner.block_number);
+        encoder.append(&self.payload_inner.payload_inner.payload_inner.payload_inner.gas_limit);
+        encoder.append(&self.payload_inner.payload_inner.payload_inner.payload_inner.gas_used);
+        encoder.append(&self.payload_inner.payload_inner.payload_inner.payload_inner.timestamp);
+        encoder.append(&self.payload_inner.payload_inner.payload_inner.payload_inner.extra_data);
+        encoder
+            .append(&self.payload_inner.payload_inner.payload_inner.payload_inner.base_fee_per_gas);
+        encoder.append(&self.payload_inner.payload_inner.payload_inner.payload_inner.block_hash);
+        encoder.append(&self.payload_inner.payload_inner.payload_inner.payload_inner.transactions);
+        encoder.append(&self.payload_inner.payload_inner.payload_inner.withdrawals);
+        encoder.append(&self.payload_inner.payload_inner.blob_gas_used);
+        encoder.append(&self.payload_inner.payload_inner.excess_blob_gas);
+        encoder.append(&self.payload_inner.block_access_list);
+        encoder.append(&self.payload_inner.slot_number);
+
+        encoder.append(&self.dependency_proof);
+        encoder.finalize();
+    }
+
+    fn ssz_bytes_len(&self) -> usize {
+        <ExecutionPayloadV4 as ssz::Encode>::ssz_bytes_len(&self.payload_inner)
+            + ssz::BYTES_PER_LENGTH_OFFSET
+            + self.dependency_proof.len()
     }
 }
 
@@ -1780,7 +1950,6 @@ impl ExecutionPayloadV4 {
                 |hash| Bytes::copy_from_slice(hash.as_slice()),
             ),
             slot_number: block.header.slot_number().unwrap_or_default(),
-            recursive_stark: block.header.recursive_stark().map(|proof| Box::new(proof.clone())),
         }
     }
 
@@ -1804,7 +1973,6 @@ impl ExecutionPayloadV4 {
             payload_inner: ExecutionPayloadV3::from_block_unchecked(block_hash, block),
             block_access_list,
             slot_number: block.header.slot_number().unwrap_or_default(),
-            recursive_stark: block.header.recursive_stark().map(|proof| Box::new(proof.clone())),
         }
     }
 
@@ -1848,7 +2016,6 @@ impl ExecutionPayloadV4 {
         let block_access_list_hash = alloy_primitives::keccak256(&self.block_access_list);
         base_block.header.block_access_list_hash = Some(block_access_list_hash);
         base_block.header.slot_number = Some(self.slot_number);
-        base_block.header.recursive_stark = self.recursive_stark;
 
         Ok(base_block)
     }
@@ -1877,7 +2044,6 @@ impl ExecutionPayloadV4 {
 
         base_block.header.block_access_list_hash = Some(keccak256(self.block_access_list));
         base_block.header.slot_number = Some(self.slot_number);
-        base_block.header.recursive_stark = self.recursive_stark;
 
         Ok(base_block)
     }
@@ -2402,6 +2568,8 @@ pub enum ExecutionPayload {
     V3(ExecutionPayloadV3),
     /// V4 payload (Amsterdam)
     V4(ExecutionPayloadV4),
+    /// V5 payload with the separately transported dependency proof.
+    V5(ExecutionPayloadV5),
 }
 
 impl ExecutionPayload {
@@ -2457,12 +2625,7 @@ impl ExecutionPayload {
         T: Encodable2718 + Transaction,
         H: BlockHeader + Sealable,
     {
-        let extras = extras.into();
-        if let Some(block_access_list) = extras.bal {
-            Self::from_block_unchecked_with_bal(block.hash_slow(), block, block_access_list)
-        } else {
-            Self::from_block_unchecked(block.hash_slow(), block)
-        }
+        Self::from_block_unchecked_with_extras(block.hash_slow(), block, extras)
     }
 
     /// Converts [`alloy_consensus::Block`] to [`ExecutionPayload`] and also returns the
@@ -2563,11 +2726,18 @@ impl ExecutionPayload {
         H: BlockHeader,
     {
         let extras = extras.into();
-        if let Some(block_access_list) = extras.bal {
+        let (payload, sidecar) = if let Some(block_access_list) = extras.bal {
             Self::from_block_unchecked_with_bal(block_hash, block, block_access_list)
         } else {
             Self::from_block_unchecked(block_hash, block)
-        }
+        };
+        let payload = match (payload, extras.dependency_proof) {
+            (Self::V4(payload_inner), Some(dependency_proof)) => {
+                Self::V5(ExecutionPayloadV5 { payload_inner, dependency_proof })
+            }
+            (payload, _) => payload,
+        };
+        (payload, sidecar)
     }
 
     /// Tries to create a new unsealed block from the given payload and payload sidecar.
@@ -2697,6 +2867,9 @@ impl ExecutionPayload {
             Self::V4(payload) => {
                 payload.into_block_raw_with_transactions_root_opt(transactions_root)
             }
+            Self::V5(payload) => {
+                payload.into_block_raw_with_transactions_root_opt(transactions_root)
+            }
         }
     }
 
@@ -2722,6 +2895,7 @@ impl ExecutionPayload {
             Self::V2(payload) => &payload.payload_inner,
             Self::V3(payload) => &payload.payload_inner.payload_inner,
             Self::V4(payload) => &payload.payload_inner.payload_inner.payload_inner,
+            Self::V5(payload) => &payload.payload_inner.payload_inner.payload_inner.payload_inner,
         }
     }
 
@@ -2732,6 +2906,9 @@ impl ExecutionPayload {
             Self::V2(payload) => &mut payload.payload_inner,
             Self::V3(payload) => &mut payload.payload_inner.payload_inner,
             Self::V4(payload) => &mut payload.payload_inner.payload_inner.payload_inner,
+            Self::V5(payload) => {
+                &mut payload.payload_inner.payload_inner.payload_inner.payload_inner
+            }
         }
     }
 
@@ -2742,6 +2919,7 @@ impl ExecutionPayload {
             Self::V2(payload) => payload.payload_inner,
             Self::V3(payload) => payload.payload_inner.payload_inner,
             Self::V4(payload) => payload.payload_inner.payload_inner.payload_inner,
+            Self::V5(payload) => payload.payload_inner.payload_inner.payload_inner.payload_inner,
         }
     }
 
@@ -2752,6 +2930,7 @@ impl ExecutionPayload {
             Self::V2(payload) => Some(payload),
             Self::V3(payload) => Some(&payload.payload_inner),
             Self::V4(payload) => Some(&payload.payload_inner.payload_inner),
+            Self::V5(payload) => Some(&payload.payload_inner.payload_inner.payload_inner),
         }
     }
 
@@ -2762,6 +2941,7 @@ impl ExecutionPayload {
             Self::V2(payload) => Some(payload),
             Self::V3(payload) => Some(&mut payload.payload_inner),
             Self::V4(payload) => Some(&mut payload.payload_inner.payload_inner),
+            Self::V5(payload) => Some(&mut payload.payload_inner.payload_inner.payload_inner),
         }
     }
 
@@ -2771,6 +2951,7 @@ impl ExecutionPayload {
             Self::V1(_) | Self::V2(_) => None,
             Self::V3(payload) => Some(payload),
             Self::V4(payload) => Some(&payload.payload_inner),
+            Self::V5(payload) => Some(&payload.payload_inner.payload_inner),
         }
     }
 
@@ -2780,6 +2961,7 @@ impl ExecutionPayload {
             Self::V1(_) | Self::V2(_) => None,
             Self::V3(payload) => Some(payload),
             Self::V4(payload) => Some(&mut payload.payload_inner),
+            Self::V5(payload) => Some(&mut payload.payload_inner.payload_inner),
         }
     }
 
@@ -2788,6 +2970,7 @@ impl ExecutionPayload {
         match self {
             Self::V1(_) | Self::V2(_) | Self::V3(_) => None,
             Self::V4(payload) => Some(payload),
+            Self::V5(payload) => Some(&payload.payload_inner),
         }
     }
 
@@ -2796,6 +2979,15 @@ impl ExecutionPayload {
         match self {
             Self::V1(_) | Self::V2(_) | Self::V3(_) => None,
             Self::V4(payload) => Some(payload),
+            Self::V5(payload) => Some(&mut payload.payload_inner),
+        }
+    }
+
+    /// Returns the V5 payload, when a dependency proof was supplied.
+    pub const fn as_v5(&self) -> Option<&ExecutionPayloadV5> {
+        match self {
+            Self::V5(payload) => Some(payload),
+            _ => None,
         }
     }
 
@@ -3171,6 +3363,12 @@ impl From<ExecutionPayloadV4> for ExecutionPayload {
     }
 }
 
+impl From<ExecutionPayloadV5> for ExecutionPayload {
+    fn from(payload: ExecutionPayloadV5) -> Self {
+        Self::V5(payload)
+    }
+}
+
 impl<T: Decodable2718> TryFrom<ExecutionPayload> for Block<T> {
     type Error = PayloadError;
 
@@ -3208,7 +3406,7 @@ impl<'de> serde::Deserialize<'de> for ExecutionPayload {
             "excessBlobGas",
             "blockAccessList",
             "slotNumber",
-            "recursiveStark",
+            "dependencyProof",
         ];
 
         // Optional fields may be omitted but, unlike a plain `Option`, must not be `null`.
@@ -3240,8 +3438,8 @@ impl<'de> serde::Deserialize<'de> for ExecutionPayload {
                 block_access_list: Option<Bytes>,
                 #[serde(default, deserialize_with = "present_quantity")]
                 slot_number: Option<u64>,
-                #[serde(default)]
-                recursive_stark: Option<Box<RecursiveStark>>,
+                #[serde(default, deserialize_with = "present")]
+                dependency_proof: Option<Bytes>,
             }
         }
 
@@ -3258,14 +3456,14 @@ impl<'de> serde::Deserialize<'de> for ExecutionPayload {
                         excess_blob_gas,
                         block_access_list,
                         slot_number,
-                        recursive_stark,
+                        dependency_proof,
                     ),
                 ) = helper.into_parts();
                 let no_v3_or_v4_fields = blob_gas_used.is_none()
                     && excess_blob_gas.is_none()
                     && block_access_list.is_none()
                     && slot_number.is_none()
-                    && recursive_stark.is_none();
+                    && dependency_proof.is_none();
 
                 let Some(withdrawals) = withdrawals else {
                     // reject V3 and V4 fields without V2 fields
@@ -3290,14 +3488,19 @@ impl<'de> serde::Deserialize<'de> for ExecutionPayload {
 
                 match (block_access_list, slot_number) {
                     (Some(block_access_list), Some(slot_number)) => {
-                        Ok(Self::V4(ExecutionPayloadV4 {
+                        let payload_inner = ExecutionPayloadV4 {
                             payload_inner: v3,
                             block_access_list,
                             slot_number,
-                            recursive_stark,
-                        }))
+                        };
+                        Ok(match dependency_proof {
+                            Some(dependency_proof) => {
+                                Self::V5(ExecutionPayloadV5 { payload_inner, dependency_proof })
+                            }
+                            None => Self::V4(payload_inner),
+                        })
                     }
-                    (None, None) if recursive_stark.is_none() => Ok(Self::V3(v3)),
+                    (None, None) if dependency_proof.is_none() => Ok(Self::V3(v3)),
                     // reject incomplete V4 payloads
                     _ => Err(INVALID_VARIANT),
                 }
@@ -3461,6 +3664,9 @@ pub struct PayloadAttributes {
         )
     )]
     pub target_gas_limit: Option<u64>,
+    /// Counted proof-carrying inclusion lists supplied by `forkchoiceUpdatedV6`.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub inclusion_lists: Option<Vec<crate::InclusionListV1>>,
 }
 
 impl PayloadAttributes {
@@ -3513,8 +3719,14 @@ impl PayloadAttributes {
         Self::ssz_v4_slot_fixed_len() + <u64 as ssz::Encode>::ssz_fixed_len()
     }
 
+    fn ssz_v6_fixed_len() -> usize {
+        Self::ssz_v4_target_fixed_len() + ssz::BYTES_PER_LENGTH_OFFSET
+    }
+
     fn ssz_fixed_section_len(&self) -> usize {
-        if self.target_gas_limit.is_some() {
+        if self.inclusion_lists.is_some() {
+            Self::ssz_v6_fixed_len()
+        } else if self.target_gas_limit.is_some() {
             Self::ssz_v4_target_fixed_len()
         } else if self.slot_number.is_some() {
             Self::ssz_v4_slot_fixed_len()
@@ -3556,10 +3768,13 @@ impl ssz::Encode for PayloadAttributes {
             encoder.append(&self.slot_number.unwrap_or_default());
         }
 
-        if fixed_section_len == Self::ssz_v4_target_fixed_len() {
+        if fixed_section_len >= Self::ssz_v4_target_fixed_len() {
             encoder.append(&self.target_gas_limit.unwrap_or_default());
         }
 
+        if let Some(lists) = &self.inclusion_lists {
+            encoder.append(lists);
+        }
         encoder.finalize();
     }
 
@@ -3571,7 +3786,9 @@ impl ssz::Encode for PayloadAttributes {
             0
         };
 
-        fixed_section_len + withdrawals_len
+        fixed_section_len
+            + withdrawals_len
+            + self.inclusion_lists.as_ref().map(ssz::Encode::ssz_bytes_len).unwrap_or_default()
     }
 }
 
@@ -3599,6 +3816,7 @@ impl ssz::Decode for PayloadAttributes {
                 parent_beacon_block_root: None,
                 slot_number: None,
                 target_gas_limit: None,
+                inclusion_lists: None,
             });
         }
 
@@ -3635,6 +3853,7 @@ impl ssz::Decode for PayloadAttributes {
                     parent_beacon_block_root: None,
                     slot_number: None,
                     target_gas_limit: None,
+                    inclusion_lists: None,
                 })
             }
             offset if offset == Self::ssz_v3_fixed_len() => {
@@ -3649,6 +3868,7 @@ impl ssz::Decode for PayloadAttributes {
                     parent_beacon_block_root: Some(decoder.decode_next()?),
                     slot_number: None,
                     target_gas_limit: None,
+                    inclusion_lists: None,
                 })
             }
             offset if offset == Self::ssz_v4_slot_fixed_len() => {
@@ -3664,6 +3884,7 @@ impl ssz::Decode for PayloadAttributes {
                     parent_beacon_block_root: Some(decoder.decode_next()?),
                     slot_number: Some(decoder.decode_next()?),
                     target_gas_limit: None,
+                    inclusion_lists: None,
                 })
             }
             offset if offset == Self::ssz_v4_target_fixed_len() => {
@@ -3680,6 +3901,25 @@ impl ssz::Decode for PayloadAttributes {
                     parent_beacon_block_root: Some(decoder.decode_next()?),
                     slot_number: Some(decoder.decode_next()?),
                     target_gas_limit: Some(decoder.decode_next()?),
+                    inclusion_lists: None,
+                })
+            }
+            offset if offset == Self::ssz_v6_fixed_len() => {
+                builder.register_type::<B256>()?;
+                builder.register_type::<u64>()?;
+                builder.register_type::<u64>()?;
+                builder.register_type::<Vec<crate::InclusionListV1>>()?;
+                let mut decoder = builder.build()?;
+
+                Ok(Self {
+                    timestamp: decoder.decode_next()?,
+                    prev_randao: decoder.decode_next()?,
+                    suggested_fee_recipient: decoder.decode_next()?,
+                    withdrawals: Some(decoder.decode_next()?),
+                    parent_beacon_block_root: Some(decoder.decode_next()?),
+                    slot_number: Some(decoder.decode_next()?),
+                    target_gas_limit: Some(decoder.decode_next()?),
+                    inclusion_lists: Some(decoder.decode_next()?),
                 })
             }
             offset => Err(ssz::DecodeError::BytesInvalid(format!(
@@ -4208,33 +4448,6 @@ mod tests {
     use alloy_primitives::{b256, hex};
     use similar_asserts::assert_eq;
 
-    #[cfg(feature = "ssz")]
-    #[test]
-    fn recursive_stark_payload_roundtrip() {
-        use ssz::{Decode, Encode};
-        let mut payload = ssz_payload_v4();
-        let ordinary = payload.as_ssz_bytes();
-        assert_eq!(ExecutionPayloadV4::from_ssz_bytes(&ordinary).unwrap(), payload);
-        payload.recursive_stark = Some(Box::new(RecursiveStark {
-            stark_proof: Bytes::from_static(&[1, 2, 3]),
-            block_deps_hash: B256::repeat_byte(7),
-        }));
-        let encoded = payload.as_ssz_bytes();
-        assert_eq!(encoded.len(), payload.ssz_bytes_len());
-        assert_eq!(ExecutionPayloadV4::from_ssz_bytes(&encoded).unwrap(), payload);
-        assert_eq!(
-            serde_json::from_str::<ExecutionPayloadV4>(&serde_json::to_string(&payload).unwrap())
-                .unwrap(),
-            payload
-        );
-        let erased = ExecutionPayload::V4(payload);
-        assert_eq!(
-            serde_json::from_str::<ExecutionPayload>(&serde_json::to_string(&erased).unwrap())
-                .unwrap(),
-            erased
-        );
-    }
-
     #[test]
     fn convert_empty_bundle() {
         assert_eq!(
@@ -4529,7 +4742,6 @@ mod tests {
             payload_inner: ssz_payload_v3(),
             block_access_list: Bytes::from(vec![18, 19]),
             slot_number: 20,
-            recursive_stark: None,
         }
     }
 
@@ -4664,6 +4876,7 @@ mod tests {
             parent_beacon_block_root: None,
             slot_number: None,
             target_gas_limit: None,
+            inclusion_lists: None,
         };
         let decoded_v1 = PayloadAttributes::from_ssz_bytes(&v1.as_ssz_bytes()).unwrap();
         assert_eq!(decoded_v1, v1);
@@ -4676,6 +4889,7 @@ mod tests {
             parent_beacon_block_root: None,
             slot_number: None,
             target_gas_limit: None,
+            inclusion_lists: None,
         };
         let decoded_v2 = PayloadAttributes::from_ssz_bytes(&v2.as_ssz_bytes()).unwrap();
         assert_eq!(decoded_v2, v2);
@@ -4688,6 +4902,7 @@ mod tests {
             parent_beacon_block_root: Some(B256::with_last_byte(33)),
             slot_number: None,
             target_gas_limit: None,
+            inclusion_lists: None,
         };
         let decoded_v3 = PayloadAttributes::from_ssz_bytes(&v3.as_ssz_bytes()).unwrap();
         assert_eq!(decoded_v3, v3);
@@ -4700,6 +4915,7 @@ mod tests {
             parent_beacon_block_root: Some(B256::with_last_byte(43)),
             slot_number: Some(44),
             target_gas_limit: Some(45),
+            inclusion_lists: None,
         };
         let decoded_v4 = PayloadAttributes::from_ssz_bytes(&v4.as_ssz_bytes()).unwrap();
         assert_eq!(decoded_v4, v4);
@@ -4725,6 +4941,7 @@ mod tests {
             parent_beacon_block_root: None,
             slot_number: None,
             target_gas_limit: None,
+            inclusion_lists: None,
         };
         assert_eq!(v1.as_ssz_bytes().len(), 60);
 
@@ -4736,6 +4953,7 @@ mod tests {
             parent_beacon_block_root: None,
             slot_number: None,
             target_gas_limit: None,
+            inclusion_lists: None,
         };
         let bytes = v2.as_ssz_bytes();
         assert_eq!(u32::from_le_bytes(bytes[60..64].try_into().unwrap()), 64);
@@ -4748,6 +4966,7 @@ mod tests {
             parent_beacon_block_root: Some(B256::with_last_byte(33)),
             slot_number: None,
             target_gas_limit: None,
+            inclusion_lists: None,
         };
         let bytes = v3.as_ssz_bytes();
         assert_eq!(u32::from_le_bytes(bytes[60..64].try_into().unwrap()), 96);
@@ -4760,6 +4979,7 @@ mod tests {
             parent_beacon_block_root: Some(B256::with_last_byte(43)),
             slot_number: Some(44),
             target_gas_limit: Some(45),
+            inclusion_lists: None,
         };
         let bytes = v4.as_ssz_bytes();
         assert_eq!(u32::from_le_bytes(bytes[60..64].try_into().unwrap()), 112);
@@ -5733,7 +5953,6 @@ mod tests {
             },
             block_access_list: Bytes::from(vec![0xaa, 0xbb]),
             slot_number: 0,
-            recursive_stark: None,
         };
 
         let serialized = serde_json::to_string(&payload).unwrap();
@@ -5837,7 +6056,6 @@ mod tests {
             },
             block_access_list: block_access_list.clone(),
             slot_number: 7,
-            recursive_stark: None,
         });
 
         assert_eq!(payload.slot_number(), Some(7));

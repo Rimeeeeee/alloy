@@ -97,6 +97,7 @@ fn execution_payload_variant_selection() {
             ExecutionPayload::V2(_) => 2,
             ExecutionPayload::V3(_) => 3,
             ExecutionPayload::V4(_) => 4,
+            ExecutionPayload::V5(_) => 5,
         });
         if version != expected {
             mismatches.push(format!("{name}: expected {expected:?}, got {version:?}"));
@@ -278,6 +279,7 @@ fn execution_payload_fork_field_combinations() {
                 ExecutionPayload::V2(_) => 2,
                 ExecutionPayload::V3(_) => 3,
                 ExecutionPayload::V4(_) => 4,
+                ExecutionPayload::V5(_) => 5,
             });
             assert_eq!(version, expected_version, "fork states: {states:?}");
             if let Ok(payload) = result {

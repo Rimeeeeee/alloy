@@ -606,8 +606,12 @@ impl<H: BlockHeader> BlockHeader for Header<H> {
         self.inner.slot_number()
     }
 
-    fn recursive_stark(&self) -> Option<&alloy_eips::eip8288::RecursiveStark> {
-        self.inner.recursive_stark()
+    fn dependency_proof_hash(&self) -> Option<B256> {
+        self.inner.dependency_proof_hash()
+    }
+
+    fn block_deps_hash(&self) -> Option<B256> {
+        self.inner.block_deps_hash()
     }
 
     fn extra_data(&self) -> &Bytes {

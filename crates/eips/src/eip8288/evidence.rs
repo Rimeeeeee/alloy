@@ -1,8 +1,8 @@
 //! Bounded, immutable evidence shared by transactions from the same wrapper.
 
 use super::{
-    proofs::{validate_dependencies, verify_proof, ProofError, MAX_PROOF_BYTES},
-    SignatureDependency, MAX_LEANSIG_DEPS_PER_WRAPPER,
+    proofs::{validate_dependencies, verify_proof, ProofError},
+    SignatureDependency, MAX_DEPENDENCY_PROOF_BYTES, MAX_LEANSIG_DEPS_PER_WRAPPER,
 };
 use alloy_primitives::Bytes;
 use lean_vm::lean_sphincs;
@@ -54,7 +54,7 @@ impl DependencyEvidence {
         proof: Bytes,
     ) -> Result<Self, ProofError> {
         validate_dependencies(&dependencies)?;
-        if proof.len() > MAX_PROOF_BYTES || dependencies.is_empty() != proof.is_empty() {
+        if proof.len() > MAX_DEPENDENCY_PROOF_BYTES || dependencies.is_empty() != proof.is_empty() {
             return Err(ProofError::Proof);
         }
         Ok(Self { dependencies, witness: Witness::Aggregate(proof), verified: OnceLock::new() })

@@ -5,6 +5,12 @@ use alloy_primitives::{Bytes, B256, U256};
 /// Error that can occur when handling payloads.
 #[derive(Debug, derive_more::Display)]
 pub enum PayloadError {
+    /// The serialized dependency proof exceeds the protocol bound.
+    #[display("dependency proof exceeds the byte limit: {_0}")]
+    DependencyProofTooLarge(usize),
+    /// A frame transaction contains invalid dependency declarations.
+    #[display("{_0}")]
+    InvalidDependencies(alloy_eips::eip8288::DependencyValidationError),
     /// Invalid payload extra data.
     #[display("invalid payload extra data: {_0}")]
     ExtraData(Bytes),

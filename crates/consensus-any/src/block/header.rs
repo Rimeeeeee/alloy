@@ -119,9 +119,12 @@ pub struct AnyHeader {
         )
     )]
     pub slot_number: Option<u64>,
-    /// EIP-8288 dependency proof.
+    /// EIP-8288 commitment to the separately stored dependency proof.
     #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
-    pub recursive_stark: Option<alloc::boxed::Box<alloy_eips::eip8288::RecursiveStark>>,
+    pub dependency_proof_hash: Option<B256>,
+    /// EIP-8288 digest of the block's dependencies.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub block_deps_hash: Option<B256>,
 }
 
 impl AnyHeader {
@@ -179,7 +182,8 @@ impl AnyHeader {
             requests_hash,
             block_access_list_hash,
             slot_number,
-            recursive_stark,
+            dependency_proof_hash,
+            block_deps_hash,
         } = self;
 
         Header {
@@ -206,7 +210,8 @@ impl AnyHeader {
             requests_hash,
             block_access_list_hash,
             slot_number,
-            recursive_stark,
+            dependency_proof_hash,
+            block_deps_hash,
         }
     }
 }
@@ -300,8 +305,12 @@ impl BlockHeader for AnyHeader {
         self.slot_number
     }
 
-    fn recursive_stark(&self) -> Option<&alloy_eips::eip8288::RecursiveStark> {
-        self.recursive_stark.as_deref()
+    fn dependency_proof_hash(&self) -> Option<B256> {
+        self.dependency_proof_hash
+    }
+
+    fn block_deps_hash(&self) -> Option<B256> {
+        self.block_deps_hash
     }
 
     fn extra_data(&self) -> &Bytes {
@@ -335,7 +344,8 @@ impl From<Header> for AnyHeader {
             requests_hash,
             block_access_list_hash,
             slot_number,
-            recursive_stark,
+            dependency_proof_hash,
+            block_deps_hash,
         } = value;
 
         Self {
@@ -362,7 +372,8 @@ impl From<Header> for AnyHeader {
             requests_hash,
             block_access_list_hash,
             slot_number,
-            recursive_stark,
+            dependency_proof_hash,
+            block_deps_hash,
         }
     }
 }
@@ -429,6 +440,20 @@ where
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn eip8288_commitments_survive_header_conversion() {
+        use super::*;
+        let header = Header {
+            dependency_proof_hash: Some(B256::repeat_byte(1)),
+            block_deps_hash: Some(B256::repeat_byte(2)),
+            ..Default::default()
+        };
+        let any = AnyHeader::from(header.clone());
+        assert_eq!(any.dependency_proof_hash(), header.dependency_proof_hash);
+        assert_eq!(any.block_deps_hash(), header.block_deps_hash);
+        assert_eq!(any.try_into_header().unwrap(), header);
+    }
 
     // <https://github.com/alloy-rs/alloy/issues/2494>
     #[test]

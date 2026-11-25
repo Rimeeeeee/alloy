@@ -4,10 +4,10 @@
 //! reconstructs leanVM's exact native claims independently from the block dependencies.
 
 use super::{
-    evidence::Witness, DependencyEvidence, DependencyValidationError, RecursiveStark,
-    SignatureDependency, LEANSPHINCS_SCHEME,
+    evidence::Witness, DependencyEvidence, DependencyValidationError, SignatureDependency,
+    LEANSPHINCS_SCHEME, MAX_DEPENDENCY_PROOF_BYTES,
 };
-use alloy_primitives::{Bytes, Keccak256, B256};
+use alloy_primitives::Bytes;
 use lean_vm::{lean_sphincs, AggregateClaims, AggregateProof, OutputClaims};
 use std::{
     collections::BTreeMap,
@@ -16,8 +16,6 @@ use std::{
 
 /// Maximum canonical dependencies in an experimental block aggregate.
 pub const MAX_AGGREGATE_DEPENDENCIES: usize = 16_384;
-/// Maximum serialized aggregate proof accepted by this devnet profile.
-pub const MAX_PROOF_BYTES: usize = 1_048_576;
 /// Maximum encoded wrapper size in the experimental gossip protocol.
 pub const MAX_WRAPPER_BYTES: usize = 2_097_152;
 /// Pinned program and proof-system profile, separate from the unfinished protocol constants.
@@ -41,6 +39,9 @@ pub enum ProofError {
     /// The serialized proof is malformed or does not establish the expected claims.
     #[error("invalid EIP-8288 aggregate proof")]
     Proof,
+    /// The local verifier could not initialize or complete. This does not invalidate a block.
+    #[error("EIP-8288 verifier unavailable")]
+    VerifierUnavailable,
     /// A declared hash differs from the dependencies reconstructed from transactions.
     #[error("EIP-8288 dependency coverage mismatch")]
     Coverage,
@@ -55,43 +56,21 @@ pub enum ProofError {
     Aggregation(#[from] lean_vm::AggregateError),
 }
 
-/// Computes the devnet header digest without allocating a concatenation buffer.
-pub fn dependency_digest(dependencies: &[SignatureDependency]) -> B256 {
-    let mut hash = Keccak256::new();
-    for dependency in dependencies {
-        hash.update(dependency.data_hash);
-        hash.update(dependency.verification_key_hash);
-    }
-    hash.finalize()
-}
-
-/// Checks the header digest and proof against the exact dependencies of the block.
-pub fn verify_header(
-    dependencies: &[SignatureDependency],
-    entry: &RecursiveStark,
-) -> Result<(), ProofError> {
-    if entry.block_deps_hash != dependency_digest(dependencies) {
-        return Err(ProofError::Coverage);
-    }
-    verify_proof(dependencies, &entry.stark_proof)
-}
-
 /// Recursively combines verified evidence, retaining exactly the dependencies selected for output.
 /// Call from a blocking proving worker, not an asynchronous executor thread.
 pub fn prove(
     dependencies: &[SignatureDependency],
     inputs: &[Arc<DependencyEvidence>],
-) -> Result<RecursiveStark, ProofError> {
+) -> Result<Bytes, ProofError> {
     validate_dependencies(dependencies)?;
-    let block_deps_hash = dependency_digest(dependencies);
     if dependencies.is_empty() {
-        return Ok(RecursiveStark { stark_proof: Bytes::new(), block_deps_hash });
+        return Ok(Bytes::new());
     }
     for input in inputs {
         match &input.witness {
             Witness::Aggregate(proof) if input.dependencies == dependencies => {
                 input.verify()?;
-                return Ok(RecursiveStark { stark_proof: proof.clone(), block_deps_hash });
+                return Ok(proof.clone());
             }
             _ => {}
         }
@@ -184,10 +163,10 @@ pub fn prove(
         1,
     )?;
     let stark_proof = Bytes::from(proof.to_bytes());
-    if stark_proof.len() > MAX_PROOF_BYTES {
+    if stark_proof.len() > MAX_DEPENDENCY_PROOF_BYTES {
         return Err(ProofError::Proof);
     }
-    Ok(RecursiveStark { stark_proof, block_deps_hash })
+    Ok(stark_proof)
 }
 
 fn setup() {
@@ -221,39 +200,44 @@ fn claims(dependencies: &[SignatureDependency]) -> AggregateClaims {
     AggregateClaims { lean_sphincs, ..Default::default() }
 }
 
-pub(super) fn verify_proof(
-    dependencies: &[SignatureDependency],
-    proof: &[u8],
-) -> Result<(), ProofError> {
+/// Verifies a serialized proof against the exact canonical dependency claims.
+pub fn verify_proof(dependencies: &[SignatureDependency], proof: &[u8]) -> Result<(), ProofError> {
     validate_dependencies(dependencies)?;
-    if proof.len() > MAX_PROOF_BYTES {
+    if proof.len() > MAX_DEPENDENCY_PROOF_BYTES {
         return Err(ProofError::Proof);
     }
     if dependencies.is_empty() {
         return if proof.is_empty() { Ok(()) } else { Err(ProofError::Proof) };
     }
-    setup();
-    if !AggregateProof::from_bytes(proof).is_some_and(|proof| proof.verify(&claims(dependencies))) {
-        return Err(ProofError::Proof);
-    }
-    Ok(())
+    std::panic::catch_unwind(|| {
+        setup();
+        if !AggregateProof::from_bytes(proof)
+            .is_some_and(|proof| proof.verify(&claims(dependencies)))
+        {
+            return Err(ProofError::Proof);
+        }
+        Ok(())
+    })
+    .map_err(|_| ProofError::VerifierUnavailable)?
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::eip8288::dependency_digest;
+    use alloy_primitives::B256;
 
     #[test]
     fn empty_and_malformed_proofs_fail_closed() {
         let empty = prove(&[], &[]).unwrap();
-        assert_eq!(verify_header(&[], &empty), Ok(()));
+        assert_eq!(verify_proof(&[], &empty), Ok(()));
         assert_eq!(dependency_digest(&[]), alloy_primitives::keccak256([]));
         let dependency = SignatureDependency {
             scheme: LEANSPHINCS_SCHEME,
             data_hash: B256::repeat_byte(1),
             verification_key_hash: B256::repeat_byte(2),
         };
-        assert_eq!(verify_header(&[dependency], &empty), Err(ProofError::Coverage));
+        assert_eq!(verify_proof(&[dependency], &empty), Err(ProofError::Proof));
         assert_eq!(
             DependencyEvidence::direct(vec![dependency], vec![]).unwrap_err(),
             ProofError::WitnessCount
@@ -316,33 +300,25 @@ mod tests {
             Arc::new(DependencyEvidence::direct(dependencies.clone(), signatures.clone()).unwrap());
         assert_eq!(direct.verify(), Ok(()));
         let leaf = prove(&dependencies, &[Arc::clone(&direct)]).unwrap();
-        assert_eq!(verify_header(&dependencies, &leaf), Ok(()));
-        let child = Arc::new(
-            DependencyEvidence::aggregate(dependencies.clone(), leaf.stark_proof).unwrap(),
-        );
+        assert_eq!(verify_proof(&dependencies, &leaf), Ok(()));
+        let child = Arc::new(DependencyEvidence::aggregate(dependencies.clone(), leaf).unwrap());
         let reused = prove(&dependencies, &[Arc::clone(&child)]).unwrap();
-        assert_eq!(reused.stark_proof.as_ref(), child.wire_witnesses().1[0].as_ref());
+        assert_eq!(reused.as_ref(), child.wire_witnesses().1[0].as_ref());
         let retained = &dependencies[..1];
         let root = prove(retained, &[child, Arc::clone(&direct)]).unwrap();
-        assert_eq!(verify_header(retained, &root), Ok(()));
-        assert_eq!(verify_header(&dependencies, &root), Err(ProofError::Coverage));
+        assert_eq!(verify_proof(retained, &root), Ok(()));
+        assert_eq!(verify_proof(&dependencies, &root), Err(ProofError::Proof));
 
         // More than a batch of unrelated valid children must not trigger empty consolidation.
-        let unrelated = Arc::new(
-            DependencyEvidence::aggregate(retained.to_vec(), root.stark_proof.clone()).unwrap(),
-        );
+        let unrelated =
+            Arc::new(DependencyEvidence::aggregate(retained.to_vec(), root).unwrap());
         let mut inputs = vec![unrelated; lean_vm::MAX_RECURSIONS + 1];
         inputs.push(direct);
         let selected = &dependencies[1..];
         let selected_proof = prove(selected, &inputs).unwrap();
-        assert_eq!(verify_header(selected, &selected_proof), Ok(()));
-        assert_eq!(verify_header(&dependencies, &selected_proof), Err(ProofError::Coverage));
+        assert_eq!(verify_proof(selected, &selected_proof), Ok(()));
+        assert_eq!(verify_proof(&dependencies, &selected_proof), Err(ProofError::Proof));
 
-        let wrong = RecursiveStark {
-            block_deps_hash: dependency_digest(&dependencies),
-            stark_proof: root.stark_proof,
-        };
-        assert_eq!(verify_header(&dependencies, &wrong), Err(ProofError::Proof));
         signatures[0] = Bytes::from(vec![0; lean_sphincs::SIG_SIZE]);
         let forged = DependencyEvidence::direct(dependencies, signatures).unwrap();
         assert_eq!(forged.verify(), Err(ProofError::Signature));

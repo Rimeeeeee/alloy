@@ -9,11 +9,11 @@
 //! See also <https://github.com/ethereum/consensus-specs/blob/master/specs/deneb/beacon-chain.md#executionpayload>
 
 use crate::{withdrawals::BeaconWithdrawal, BlsPublicKey};
-use alloy_eips::{eip4895::Withdrawal, eip8288::RecursiveStark};
+use alloy_eips::eip4895::Withdrawal;
 use alloy_primitives::{Address, Bloom, Bytes, B256, U256};
 use alloy_rpc_types_engine::{
     ExecutionPayload, ExecutionPayloadV1, ExecutionPayloadV2, ExecutionPayloadV3,
-    ExecutionPayloadV4,
+    ExecutionPayloadV4, ExecutionPayloadV5,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_with::{serde_as, DisplayFromStr};
@@ -160,6 +160,8 @@ struct BeaconPayloadAttributes {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde_as(as = "Option<DisplayFromStr>")]
     target_gas_limit: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    inclusion_lists: Option<Vec<alloy_rpc_types_engine::InclusionListV1>>,
 }
 
 /// A helper module for serializing and deserializing the payload attributes for the beacon API.
@@ -188,6 +190,7 @@ pub mod beacon_api_payload_attributes {
             parent_beacon_block_root: payload_attributes.parent_beacon_block_root,
             slot_number: payload_attributes.slot_number,
             target_gas_limit: payload_attributes.target_gas_limit,
+            inclusion_lists: payload_attributes.inclusion_lists.clone(),
         };
         beacon_api_payload_attributes.serialize(serializer)
     }
@@ -206,6 +209,7 @@ pub mod beacon_api_payload_attributes {
             parent_beacon_block_root: beacon_api_payload_attributes.parent_beacon_block_root,
             slot_number: beacon_api_payload_attributes.slot_number,
             target_gas_limit: beacon_api_payload_attributes.target_gas_limit,
+            inclusion_lists: beacon_api_payload_attributes.inclusion_lists,
         })
     }
 }
@@ -457,37 +461,26 @@ struct BeaconExecutionPayloadV4<'a> {
     /// The slot number corresponding to this block, calculated in the consensus layer.
     #[serde_as(as = "DisplayFromStr")]
     slot_number: u64,
-    /// Experimental EIP-8288 proof entry, absent from ordinary beacon payloads.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    recursive_stark: Option<Cow<'a, RecursiveStark>>,
 }
 
 impl<'a> From<BeaconExecutionPayloadV4<'a>> for ExecutionPayloadV4 {
     fn from(payload: BeaconExecutionPayloadV4<'a>) -> Self {
-        let BeaconExecutionPayloadV4 {
-            payload_inner,
-            block_access_list,
-            slot_number,
-            recursive_stark,
-        } = payload;
+        let BeaconExecutionPayloadV4 { payload_inner, block_access_list, slot_number } = payload;
         Self {
             payload_inner: payload_inner.into(),
             block_access_list: block_access_list.into_owned(),
             slot_number,
-            recursive_stark: recursive_stark.map(|proof| Box::new(proof.into_owned())),
         }
     }
 }
 
 impl<'a> From<&'a ExecutionPayloadV4> for BeaconExecutionPayloadV4<'a> {
     fn from(value: &'a ExecutionPayloadV4) -> Self {
-        let ExecutionPayloadV4 { payload_inner, block_access_list, slot_number, recursive_stark } =
-            value;
+        let ExecutionPayloadV4 { payload_inner, block_access_list, slot_number } = value;
         BeaconExecutionPayloadV4 {
             payload_inner: payload_inner.into(),
             block_access_list: Cow::Borrowed(block_access_list),
             slot_number: *slot_number,
-            recursive_stark: recursive_stark.as_deref().map(Cow::Borrowed),
         }
     }
 }
@@ -517,12 +510,40 @@ pub mod beacon_payload_v4 {
     }
 }
 
+/// Beacon representation of the flat V5 execution payload.
+#[derive(Debug, Serialize, Deserialize)]
+struct BeaconExecutionPayloadV5<'a> {
+    #[serde(flatten)]
+    payload_inner: BeaconExecutionPayloadV4<'a>,
+    dependency_proof: Cow<'a, Bytes>,
+}
+
+impl From<BeaconExecutionPayloadV5<'_>> for ExecutionPayloadV5 {
+    fn from(value: BeaconExecutionPayloadV5<'_>) -> Self {
+        Self {
+            payload_inner: value.payload_inner.into(),
+            dependency_proof: value.dependency_proof.into_owned(),
+        }
+    }
+}
+
+impl<'a> From<&'a ExecutionPayloadV5> for BeaconExecutionPayloadV5<'a> {
+    fn from(value: &'a ExecutionPayloadV5) -> Self {
+        Self {
+            payload_inner: (&value.payload_inner).into(),
+            dependency_proof: Cow::Borrowed(&value.dependency_proof),
+        }
+    }
+}
+
 /// Represents all possible payload versions.
 ///
 /// Variants are declared newest first, so that deserialization tries them in that order.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 enum BeaconExecutionPayload<'a> {
+    /// V5 payload with its dependency proof.
+    V5(BeaconExecutionPayloadV5<'a>),
     /// V4 payload (Amsterdam)
     V4(BeaconExecutionPayloadV4<'a>),
     /// V3 payload
@@ -540,6 +561,7 @@ impl<'a> From<BeaconExecutionPayload<'a>> for ExecutionPayload {
             BeaconExecutionPayload::V2(payload) => Self::V2(ExecutionPayloadV2::from(payload)),
             BeaconExecutionPayload::V3(payload) => Self::V3(ExecutionPayloadV3::from(payload)),
             BeaconExecutionPayload::V4(payload) => Self::V4(ExecutionPayloadV4::from(payload)),
+            BeaconExecutionPayload::V5(payload) => Self::V5(payload.into()),
         }
     }
 }
@@ -556,6 +578,7 @@ impl<'a> From<&'a ExecutionPayload> for BeaconExecutionPayload<'a> {
             ExecutionPayload::V3(payload) => {
                 BeaconExecutionPayload::V3(BeaconExecutionPayloadV3::from(payload))
             }
+            ExecutionPayload::V5(payload) => BeaconExecutionPayload::V5(payload.into()),
             ExecutionPayload::V4(payload) => {
                 BeaconExecutionPayload::V4(BeaconExecutionPayloadV4::from(payload))
             }
@@ -604,47 +627,6 @@ pub fn execution_payload_from_beacon_str(val: &str) -> Result<ExecutionPayload, 
 mod tests {
     use super::*;
     use similar_asserts::assert_eq;
-
-    #[test]
-    fn recursive_stark_beacon_payload_roundtrip() {
-        let mut payload = ExecutionPayloadV4 {
-            payload_inner: ExecutionPayloadV3 {
-                payload_inner: ExecutionPayloadV2 {
-                    payload_inner: ExecutionPayloadV1 {
-                        parent_hash: B256::ZERO,
-                        fee_recipient: Address::ZERO,
-                        state_root: B256::ZERO,
-                        receipts_root: B256::ZERO,
-                        logs_bloom: Bloom::ZERO,
-                        prev_randao: B256::ZERO,
-                        block_number: 1,
-                        gas_limit: 1_000_000,
-                        gas_used: 0,
-                        timestamp: 1,
-                        extra_data: Bytes::new(),
-                        base_fee_per_gas: U256::from(1),
-                        block_hash: B256::ZERO,
-                        transactions: vec![],
-                    },
-                    withdrawals: vec![],
-                },
-                blob_gas_used: 0,
-                excess_blob_gas: 0,
-            },
-            block_access_list: Bytes::new(),
-            slot_number: 1,
-            recursive_stark: Some(Box::new(RecursiveStark {
-                stark_proof: Bytes::from_static(&[1, 2, 3]),
-                block_deps_hash: B256::repeat_byte(7),
-            })),
-        };
-        let encoded = serde_json::to_string(&BeaconExecutionPayloadV4::from(&payload)).unwrap();
-        let decoded: BeaconExecutionPayloadV4<'_> = serde_json::from_str(&encoded).unwrap();
-        assert_eq!(ExecutionPayloadV4::from(decoded), payload);
-        payload.recursive_stark = None;
-        let ordinary = serde_json::to_value(BeaconExecutionPayloadV4::from(&payload)).unwrap();
-        assert!(ordinary.get("recursive_stark").is_none());
-    }
 
     #[test]
     fn serde_get_payload_header_response() {
@@ -846,6 +828,7 @@ mod tests {
             ExecutionPayload::V2(_) => panic!("Expected V1 payload, got V2"),
             ExecutionPayload::V3(_) => panic!("Expected V1 payload, got V3"),
             ExecutionPayload::V4(_) => panic!("Expected V1 payload, got V4"),
+            ExecutionPayload::V5(_) => panic!("Expected V1 payload, got V5"),
         }
     }
 
@@ -872,6 +855,7 @@ mod tests {
             parent_beacon_block_root: attrs.parent_beacon_block_root,
             slot_number: attrs.slot_number,
             target_gas_limit: attrs.target_gas_limit,
+            inclusion_lists: None,
         };
         assert!(engine_attrs.slot_number.is_none());
         assert!(engine_attrs.target_gas_limit.is_none());

@@ -7,7 +7,7 @@
 //! proof sizes. Application leanSTARK declarations remain reserved and invalid.
 
 use alloy_eip8141::{Frame, FrameMode};
-use alloy_primitives::{Bytes, B256};
+use alloy_primitives::B256;
 use alloy_rlp::{RlpDecodable, RlpEncodable};
 use core::slice::ChunksExact;
 
@@ -36,17 +36,18 @@ pub const MAX_LEANSIG_DEPS_PER_WRAPPER: usize = 16;
 /// STARK dependency limit per wrapper in the current draft.
 pub const MAX_LEANSTARK_DEPS_PER_WRAPPER: usize = 1;
 
-/// The EIP-8288 block header entry; the dependency list is reconstructed from transactions.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, RlpEncodable, RlpDecodable)]
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
-#[cfg_attr(feature = "borsh", derive(borsh::BorshSerialize, borsh::BorshDeserialize))]
-pub struct RecursiveStark {
-    /// Serialized recursive proof, empty exactly when there are no dependencies.
-    pub stark_proof: Bytes,
-    /// Digest of the sorted, distinct dependencies of the block.
-    pub block_deps_hash: B256,
+/// Maximum serialized dependency proof size.
+pub const MAX_DEPENDENCY_PROOF_BYTES: usize = 1 << 20;
+
+/// Computes the experimental Keccak digest over canonical message/public-key pairs.
+/// The protocol's `DEPS_HASH` and verification key remain unspecified.
+pub fn dependency_digest(dependencies: &[SignatureDependency]) -> B256 {
+    let mut hash = alloy_primitives::Keccak256::new();
+    for dependency in dependencies {
+        hash.update(dependency.data_hash);
+        hash.update(dependency.verification_key_hash);
+    }
+    hash.finalize()
 }
 
 /// A declaration, or a resolved dependency after replacing a zero message hash.
@@ -190,8 +191,7 @@ mod wrapper;
 pub use evidence::DependencyEvidence;
 #[cfg(feature = "eip8288-proofs")]
 pub use proofs::{
-    dependency_digest, prove, verify_header, ProofError, MAX_AGGREGATE_DEPENDENCIES,
-    MAX_PROOF_BYTES, MAX_WRAPPER_BYTES, PROFILE,
+    prove, verify_proof, ProofError, MAX_AGGREGATE_DEPENDENCIES, MAX_WRAPPER_BYTES, PROFILE,
 };
 #[cfg(feature = "eip8288-proofs")]
 pub use wrapper::DependencyWrapper;

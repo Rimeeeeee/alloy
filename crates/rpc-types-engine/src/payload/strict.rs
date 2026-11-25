@@ -121,7 +121,6 @@ mod tests {
             payload_inner,
             block_access_list: Bytes::from_static(&[0xc0]),
             slot_number: 7,
-            recursive_stark: None,
         }
     }
 
