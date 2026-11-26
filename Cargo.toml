@@ -179,3 +179,6 @@ tower-http = "0.6.1"
 blst.opt-level = 3
 c-kzg.opt-level = 3
 secp256k1-sys.opt-level = 3
+
+[patch.crates-io]
+alloy-eip8141 = { git = "https://github.com/Rimeeeeee/eips", rev = "621371a6937ccd301d16b1e877887786b0f5b2ae" }

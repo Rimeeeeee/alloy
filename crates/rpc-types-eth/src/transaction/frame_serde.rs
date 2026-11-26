@@ -1,8 +1,7 @@
 //! JSON adapters for frame transaction requests.
 
-use alloc::{borrow::Cow, string::String, vec::Vec};
-use alloy_eips::eip8141::{FrameAddress, FrameSignature, SignatureMessage, SignatureScheme};
-use alloy_primitives::{Bytes, U256};
+use alloc::{borrow::Cow, string::String};
+use alloy_primitives::U256;
 use core::{fmt, marker::PhantomData};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -74,10 +73,7 @@ impl<'de> serde::de::Visitor<'de> for RequestVisitor {
                 RequestMap { map, wide_priority: &mut wide_priority, priority_field: false },
             ))?;
         if let Some(max_priority_fee_per_gas) = wide_priority {
-            if request.max_fee.is_none()
-                && request.frames.is_none()
-                && request.signatures.is_none()
-                && request.nonce_keys.is_none()
+            if request.max_fee.is_none() && request.frames.is_none() && request.nonce_keys.is_none()
             {
                 return Err(serde::de::Error::custom(
                     "maxPriorityFeePerGas exceeds u128 for an ordinary transaction",
@@ -106,6 +102,11 @@ impl<'de, M: serde::de::MapAccess<'de>> serde::de::MapAccess<'de> for RequestMap
         seed: K,
     ) -> Result<Option<K::Value>, Self::Error> {
         let Some(RequestKey(key)) = self.map.next_key()? else { return Ok(None) };
+        if key == "signatures" {
+            return Err(serde::de::Error::custom(
+                "EIP-8141 proof transactions have no signatures field",
+            ));
+        }
         self.priority_field = key == "maxPriorityFeePerGas";
         match key {
             Cow::Borrowed(key) => {
@@ -201,70 +202,6 @@ impl<'de, E: serde::de::Error> Deserializer<'de> for NarrowPriority<E> {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SignatureRequest {
-    scheme: SignatureScheme,
-    #[serde(default, skip_serializing_if = "is_sender")]
-    signer: FrameAddress,
-    #[serde(default)]
-    msg: SignatureMessage,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    signature: Option<Bytes>,
-}
-
-const fn is_sender(address: &FrameAddress) -> bool {
-    address.address().is_none()
-}
-
-pub(super) mod signatures {
-    use super::*;
-
-    pub(crate) fn serialize<S: Serializer>(
-        value: &Option<Vec<FrameSignature>>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        value
-            .as_ref()
-            .map(|signatures| {
-                signatures
-                    .iter()
-                    .map(|signature| SignatureRequest {
-                        scheme: signature.scheme,
-                        signer: signature.signer,
-                        msg: signature.msg,
-                        signature: if signature.signature.is_empty()
-                            && u8::from(signature.scheme) != 0
-                        {
-                            None
-                        } else {
-                            Some(signature.signature.clone())
-                        },
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .serialize(serializer)
-    }
-
-    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Option<Vec<FrameSignature>>, D::Error> {
-        Option::<Vec<SignatureRequest>>::deserialize(deserializer).map(|signatures| {
-            signatures.map(|signatures| {
-                signatures
-                    .into_iter()
-                    .map(|signature| FrameSignature {
-                        scheme: signature.scheme,
-                        signer: signature.signer,
-                        msg: signature.msg,
-                        signature: signature.signature.unwrap_or_default(),
-                    })
-                    .collect()
-            })
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::{Transaction, TransactionInfo, TransactionRequest};
@@ -274,25 +211,20 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn request_accepts_flat_frames_and_scheme_only_placeholders() {
+    fn request_accepts_flat_frames_without_signature_list() {
         let request: TransactionRequest = serde_json::from_value(json!({
             "type": "0x6", "from": Address::repeat_byte(0x11),
             "frames": [{"mode":"0x1", "executionGas":"0x123", "stateGas":"0x45"}],
-            "signatures": [{"scheme":"0x1"}]
         }))
         .unwrap();
         let frame = &request.frames.as_ref().unwrap()[0];
         assert_eq!(frame.execution_gas, Some(0x123));
         assert_eq!(frame.state_gas, Some(0x45));
         assert!(frame.target.address().is_none());
-        let signature = &request.signatures.as_ref().unwrap()[0];
-        assert!(signature.signature.is_empty());
-        assert!(signature.signer.address().is_none());
         let value = serde_json::to_value(&request).unwrap();
         assert_eq!(value["frames"][0]["executionGas"], "0x123");
         assert!(value["frames"][0].get("limits").is_none());
-        assert!(value["signatures"][0].get("signature").is_none());
-        assert!(value["signatures"][0].get("signer").is_none());
+        assert!(value.get("signatures").is_none());
     }
 
     #[test]
@@ -392,10 +324,6 @@ mod tests {
         for (duplicate, valid) in [
             (r#"{"frames":[{"mode":"0x0","mode":"0x1"}]}"#, r#"{"frames":[{"mode":"0x1"}]}"#),
             (
-                r#"{"signatures":[{"scheme":"0x0","scheme":"0x1","signature":"0x"}]}"#,
-                r#"{"signatures":[{"scheme":"0x1","signature":"0x"}]}"#,
-            ),
-            (
                 concat!(
                     r#"{"accessList":[{"address":"0x1111111111111111111111111111111111111111","#,
                     r#""address":"0x2222222222222222222222222222222222222222","storageKeys":[]}]}"#,
@@ -478,28 +406,28 @@ mod tests {
     }
 
     #[test]
-    fn unsigned_frame_fill_preserves_placeholders_without_weakening_signed_validation() {
+    fn unsigned_frame_requests_preserve_claims_and_reject_the_removed_signature_list() {
+        let mut data = vec![0u8; 64];
+        data[0] = 1;
         let request: TransactionRequest = serde_json::from_value(json!({
-            "type": "0x6", "from": Address::repeat_byte(0x11), "chainId": "0x1", "nonce": "0x0",
-            "nonceKeys": [],
-            "frames": [{"mode":"0x1", "executionGas":"0x123", "stateGas":"0x45"}],
-            "signatures": [{"scheme":"0x1"}],
-            "maxFee": "0x1", "maxPriorityFeePerGas": "0x0",
-            "blobVersionedHashes": []
-        }))
-        .unwrap();
-        assert!(request.clone().build_8141().is_err());
+            "type":"0x6", "from":Address::repeat_byte(0x11), "chainId":"0x1", "nonce":"0x0", "nonceKeys":[],
+            "frames":[{"mode":"0x4", "target":alloy_eips::eip8141::SECP256K1_VERIFIER,
+                "executionGas":"0xc1c", "stateGas":"0x0", "data":alloy_primitives::Bytes::from(data)}],
+            "maxFee":"0x1", "maxPriorityFeePerGas":"0x0", "blobVersionedHashes":[]
+        })).unwrap();
+        assert!(request.clone().build_8141().is_ok());
         let mut incomplete = request.clone();
         incomplete.frames.as_mut().unwrap()[0].execution_gas = None;
         assert_eq!(incomplete.complete_8141(), Err(vec!["missing frame executionGas"]));
         let transaction = request.build_typed_simulate_transaction().unwrap();
         let value = serde_json::to_value(&transaction).unwrap();
-        assert_eq!(value["signatures"][0]["scheme"], "0x1");
-        assert!(value["signatures"][0].get("signature").is_none());
-        assert!(value["signatures"][0].get("signer").is_none());
+        assert!(value.get("signatures").is_none());
         let decoded: alloy_consensus::EthereumTxEnvelope<alloy_consensus::TxEip4844> =
             serde_json::from_value(value).unwrap();
         assert_eq!(decoded, transaction);
+        let error =
+            serde_json::from_value::<TransactionRequest>(json!({"signatures":[]})).unwrap_err();
+        assert!(error.to_string().contains("no signatures field"));
     }
 
     #[test]
