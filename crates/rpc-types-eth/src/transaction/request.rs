@@ -15,7 +15,7 @@ use alloy_consensus::{
 };
 use alloy_eips::{
     eip7702::SignedAuthorization,
-    eip8141::{Frame, FrameSignature, TransactionFees},
+    eip8141::{Frame, TransactionFees},
 };
 use alloy_network_primitives::{TransactionBuilder4844, TransactionBuilder7702};
 use alloy_primitives::{Address, Bytes, ChainId, Signature, TxKind, B256, U256};
@@ -156,16 +156,6 @@ pub struct TransactionRequest {
     /// Ordered frames for EIP-8141 frame transactions.
     #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
     pub frames: Option<Vec<FrameRequest>>,
-    /// Signature entries for EIP-8141 frame transactions.
-    #[cfg_attr(
-        feature = "serde",
-        serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            with = "super::frame_serde::signatures"
-        )
-    )]
-    pub signatures: Option<Vec<FrameSignature>>,
     /// Full-width frame fee storage when the priority fee cannot fit in `u128`.
     /// JSON uses the canonical top-level fee fields. Explicit fields override these values.
     #[cfg_attr(feature = "serde", serde(skip))]
@@ -237,7 +227,7 @@ impl TransactionRequest {
             authorization_list,
             nonce_keys: None,
             frames: None,
-            signatures: None,
+
             eip8141_fees: None,
             max_fee: None,
         }
@@ -735,7 +725,6 @@ impl TransactionRequest {
             .cloned()
             .map(Frame::try_from)
             .collect::<Result<Vec<_>, _>>()?;
-        let signatures = self.signatures.as_deref().ok_or("signatures")?;
         let fees = self.resolved_frame_fees()?;
         let hashes: alloc::borrow::Cow<'_, [B256]> = match &self.sidecar {
             Some(sidecar) => {
@@ -757,7 +746,6 @@ impl TransactionRequest {
             nonce: self.nonce.unwrap_or_default(),
             nonce_keys: self.nonce_keys.as_deref(),
             frames: &frames,
-            signatures,
             fees: &fees,
             blob_versioned_hashes: &hashes,
         };
@@ -799,7 +787,7 @@ impl TransactionRequest {
             nonce_keys: self.nonce_keys,
             sender: self.from.unwrap_or_default(),
             frames,
-            signatures: self.signatures.unwrap_or_default(),
+
             fees,
             blob_versioned_hashes: hashes.or(self.blob_versioned_hashes).unwrap_or_default(),
         }
@@ -869,7 +857,6 @@ impl TransactionRequest {
                 self.access_list = None;
                 self.authorization_list = None;
                 self.frames = None;
-                self.signatures = None;
             }
             TxType::Eip2930 => {
                 self.max_fee_per_gas = None;
@@ -879,7 +866,6 @@ impl TransactionRequest {
                 self.sidecar = None;
                 self.authorization_list = None;
                 self.frames = None;
-                self.signatures = None;
             }
             TxType::Eip1559 => {
                 self.gas_price = None;
@@ -888,13 +874,11 @@ impl TransactionRequest {
                 self.sidecar = None;
                 self.authorization_list = None;
                 self.frames = None;
-                self.signatures = None;
             }
             TxType::Eip4844 => {
                 self.gas_price = None;
                 self.authorization_list = None;
                 self.frames = None;
-                self.signatures = None;
             }
             TxType::Eip7702 => {
                 self.gas_price = None;
@@ -902,7 +886,6 @@ impl TransactionRequest {
                 self.blob_versioned_hashes = None;
                 self.sidecar = None;
                 self.frames = None;
-                self.signatures = None;
             }
             TxType::Eip8141 => {
                 self.to = None;
@@ -986,7 +969,6 @@ impl TransactionRequest {
     /// ```
     pub const fn minimal_tx_type(&self) -> TxType {
         if self.frames.is_some()
-            || self.signatures.is_some()
             || self.nonce_keys.is_some()
             || self.max_fee.is_some()
             || self.eip8141_fees.is_some()
@@ -1088,7 +1070,6 @@ impl TransactionRequest {
         }
 
         if self.frames.is_some()
-            || self.signatures.is_some()
             || self.nonce_keys.is_some()
             || self.max_fee.is_some()
             || self.eip8141_fees.is_some()
@@ -1541,7 +1522,7 @@ impl From<TxEip8141> for TransactionRequest {
             nonce_keys,
             sender,
             frames,
-            signatures,
+
             fees,
             blob_versioned_hashes,
             ..
@@ -1556,7 +1537,7 @@ impl From<TxEip8141> for TransactionRequest {
             blob_versioned_hashes: Some(blob_versioned_hashes),
             transaction_type: Some(ty),
             frames: Some(frames.into_iter().map(Into::into).collect()),
-            signatures: Some(signatures),
+
             eip8141_fees: (fees.max_priority_fee_per_gas > U256::from(u128::MAX)).then_some(fees),
             ..Default::default()
         }
@@ -1691,7 +1672,7 @@ pub(super) mod serde_bincode_compat {
     use alloc::{borrow::Cow, vec::Vec};
     use alloy_eips::{
         eip2930::AccessList,
-        eip8141::{FrameAddress, FrameMode, FrameSignature},
+        eip8141::{FrameAddress, FrameMode},
     };
     use alloy_primitives::{Address, Bytes, ChainId, TxKind, B256, U256};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -1754,8 +1735,6 @@ pub(super) mod serde_bincode_compat {
             Option<Vec<alloy_eips::eip7702::serde_bincode_compat::SignedAuthorization<'a>>>,
         /// Ordered frames for EIP-8141 frame transactions.
         pub frames: Option<Vec<FrameRequest>>,
-        /// Signature entries for EIP-8141 frame transactions.
-        pub signatures: Option<Cow<'a, Vec<FrameSignature>>>,
         /// Full-width frame fees.
         pub eip8141_fees: Option<alloy_eips::eip8141::TransactionFees>,
         /// Total frame transaction fee budget in wei.
@@ -1827,7 +1806,7 @@ pub(super) mod serde_bincode_compat {
                     .as_ref()
                     .map(|auths| auths.iter().map(Into::into).collect()),
                 frames: value.frames.as_ref().map(|frames| frames.iter().map(Into::into).collect()),
-                signatures: value.signatures.as_ref().map(Cow::Borrowed),
+
                 eip8141_fees: value.eip8141_fees,
                 max_fee: value.max_fee,
             }
@@ -1862,7 +1841,7 @@ pub(super) mod serde_bincode_compat {
                     .authorization_list
                     .map(|list| list.into_iter().map(Into::into).collect()),
                 frames: value.frames.map(|frames| frames.into_iter().map(Into::into).collect()),
-                signatures: value.signatures.map(Cow::into_owned),
+
                 eip8141_fees: value.eip8141_fees,
                 max_fee: value.max_fee,
             }

@@ -127,10 +127,15 @@ fn wide_fees_survive_json_and_rpc_wrappers() {
 fn generic_conversion_preserves_frames_through_envelopes() {
     let mut tx = frame_tx();
     tx.frames[0].data = vec![1, 0, 2].into();
-    tx.signatures = vec![alloy_eips::eip8141::FrameSignature {
-        signature: vec![3, 4, 5].into(),
-        ..Default::default()
-    }];
+    tx.frames.insert(
+        0,
+        Frame {
+            mode: FrameMode::Proof,
+            target: alloy_eips::eip8141::SECP256K1_VERIFIER.into(),
+            data: [vec![1; 32], vec![0; 32], vec![3; 65]].concat().into(),
+            ..Default::default()
+        },
+    );
     let envelope = TxEnvelope::Eip8141(tx.clone().seal_slow());
     let request = TransactionRequest::from_transaction(AnyTxEnvelope::Ethereum(envelope));
     assert!(request.from.is_none());

@@ -242,7 +242,6 @@ mod tests {
             max_fee: Some(U256::from(2)),
             transaction_type: Some(TxType::Eip8141 as u8),
             frames: Some(vec![Frame::default().into()]),
-            signatures: Some(Vec::new()),
             ..Default::default()
         };
 

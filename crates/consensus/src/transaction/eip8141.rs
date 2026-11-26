@@ -1,4 +1,7 @@
-use alloc::{borrow::ToOwned, string::ToString, vec::Vec};
+use alloc::vec::Vec;
+
+#[cfg(feature = "serde")]
+use alloc::{borrow::ToOwned, string::ToString};
 use core::{fmt, mem::size_of};
 
 use alloy_eips::{
@@ -11,8 +14,8 @@ use alloy_eips::{
             FRAME_TX_DATA_TOKEN_STANDARD_COST, FRAME_TX_INTRINSIC_COST, FRAME_TX_PER_FRAME_COST,
             FRAME_TX_TOTAL_COST_FLOOR_PER_TOKEN, FRAME_TX_TYPE, MAX_FRAMES, TX_VALUE_COST,
         },
-        has_valid_assertion_suffix, ApprovalScope, Eip8141Error, Frame, FrameMode, FrameSignature,
-        SignatureMessage, TransactionFees,
+        has_valid_assertion_suffix, validate_proof_prefix, ApprovalScope, Frame, FrameMode,
+        TransactionFees,
     },
     eip8250::{nonce_calldata, validate_nonce_keys, KEYED_NONCE_ACCESS_COST},
     Decodable2718, Encodable2718, Typed2718,
@@ -24,19 +27,59 @@ use crate::Transaction;
 
 static EMPTY_INPUT: Bytes = Bytes::new();
 
-struct SigningFrameSignature<'a>(&'a FrameSignature);
+struct SigningFrame<'a>(&'a Frame);
 
-impl Encodable for SigningFrameSignature<'_> {
+impl SigningFrame<'_> {
+    fn data_length(&self) -> usize {
+        let frame = self.0;
+        if frame.mode != FrameMode::Proof {
+            return frame.data.length();
+        }
+        let (claim, proof) = frame.data.split_at(frame.data.len().min(64));
+        let payload_length = claim.length()
+            + proof.len().length()
+            + if frame.flags & alloy_eips::eip8141::PROOF_COMMIT_FLAG != 0 {
+                B256::ZERO.length()
+            } else {
+                0
+            };
+        Header { list: true, payload_length }.length_with_payload()
+    }
+
+    fn payload_length(&self) -> usize {
+        let frame = self.0;
+        frame.mode.length()
+            + frame.flags.length()
+            + frame.target.length()
+            + frame.limits.length()
+            + frame.value.length()
+            + self.data_length()
+    }
+}
+
+impl Encodable for SigningFrame<'_> {
     fn encode(&self, out: &mut dyn BufMut) {
-        let signature = self.0;
+        let frame = self.0;
         Header { list: true, payload_length: self.payload_length() }.encode(out);
-        signature.scheme.encode(out);
-        signature.signer.encode(out);
-        signature.msg.encode(out);
-        if signature.signs_transaction_hash() {
-            signature.signature.len().encode(out);
-        } else {
-            signature.signature.encode(out);
+        frame.mode.encode(out);
+        frame.flags.encode(out);
+        frame.target.encode(out);
+        frame.limits.encode(out);
+        frame.value.encode(out);
+        if frame.mode != FrameMode::Proof {
+            frame.data.encode(out);
+            return;
+        }
+        // Structural validation rejects a short claim; hashing malformed input must not panic.
+        let (claim, proof) = frame.data.split_at(frame.data.len().min(64));
+        let committed = frame.flags & alloy_eips::eip8141::PROOF_COMMIT_FLAG != 0;
+        let payload_length =
+            claim.length() + proof.len().length() + if committed { B256::ZERO.length() } else { 0 };
+        Header { list: true, payload_length }.encode(out);
+        claim.encode(out);
+        proof.len().encode(out);
+        if committed {
+            keccak256(proof).encode(out);
         }
     }
 
@@ -45,35 +88,19 @@ impl Encodable for SigningFrameSignature<'_> {
     }
 }
 
-impl SigningFrameSignature<'_> {
-    fn payload_length(&self) -> usize {
-        let signature = self.0;
-        signature.scheme.length()
-            + signature.signer.length()
-            + signature.msg.length()
-            + if signature.signs_transaction_hash() {
-                signature.signature.len().length()
-            } else {
-                signature.signature.length()
-            }
-    }
-}
+struct SigningFrames<'a>(&'a [Frame]);
 
-struct SigningFrameSignatures<'a>(&'a [FrameSignature]);
-
-impl Encodable for SigningFrameSignatures<'_> {
+impl Encodable for SigningFrames<'_> {
     fn encode(&self, out: &mut dyn BufMut) {
-        let payload_length =
-            self.0.iter().map(|signature| SigningFrameSignature(signature).length()).sum();
+        let payload_length = self.0.iter().map(|frame| SigningFrame(frame).length()).sum();
         Header { list: true, payload_length }.encode(out);
-        for signature in self.0 {
-            SigningFrameSignature(signature).encode(out);
+        for frame in self.0 {
+            SigningFrame(frame).encode(out);
         }
     }
 
     fn length(&self) -> usize {
-        let payload_length =
-            self.0.iter().map(|signature| SigningFrameSignature(signature).length()).sum();
+        let payload_length = self.0.iter().map(|frame| SigningFrame(frame).length()).sum();
         Header { list: true, payload_length }.length_with_payload()
     }
 }
@@ -133,8 +160,6 @@ pub struct TxEip8141 {
     /// Ordered frames to execute.
     #[cfg_attr(any(test, feature = "arbitrary"), arbitrary(with = arbitrary_frames))]
     pub frames: Vec<Frame>,
-    /// Signature entries available to validation and execution code.
-    pub signatures: Vec<FrameSignature>,
     /// EIP-8141 fee parameters.
     pub fees: TransactionFees,
     /// Blob versioned hashes.
@@ -166,18 +191,6 @@ impl serde::Serialize for TxEip8141 {
 
         #[derive(serde::Serialize)]
         #[serde(rename_all = "camelCase")]
-        struct Signature<'a> {
-            #[serde(with = "alloy_serde::quantity")]
-            scheme: u8,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            signer: Option<Address>,
-            msg: SignatureMessage,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            signature: Option<&'a Bytes>,
-        }
-
-        #[derive(serde::Serialize)]
-        #[serde(rename_all = "camelCase")]
         struct Transaction<'a> {
             #[serde(with = "alloy_serde::quantity")]
             chain_id: ChainId,
@@ -188,7 +201,6 @@ impl serde::Serialize for TxEip8141 {
             #[serde(rename = "from")]
             sender: Address,
             frames: Vec<Frame<'a>>,
-            signatures: Vec<Signature<'a>>,
             max_priority_fee_per_gas: U256,
             max_fee: U256,
             blob_versioned_hashes: &'a [B256],
@@ -204,7 +216,6 @@ impl serde::Serialize for TxEip8141 {
             nonce_keys: Option<Vec<U256>>,
             sender: Address,
             frames: &'a [alloy_eips::eip8141::Frame],
-            signatures: &'a [alloy_eips::eip8141::FrameSignature],
             fees: &'a TransactionFees,
             blob_versioned_hashes: &'a [B256],
         }
@@ -216,7 +227,6 @@ impl serde::Serialize for TxEip8141 {
                 nonce_keys: self.nonce_keys.clone(),
                 sender: self.sender,
                 frames: &self.frames,
-                signatures: &self.signatures,
                 fees: &self.fees,
                 blob_versioned_hashes: &self.blob_versioned_hashes,
             }
@@ -237,25 +247,12 @@ impl serde::Serialize for TxEip8141 {
             })
             .collect();
 
-        let signatures = self
-            .signatures
-            .iter()
-            .map(|signature| Signature {
-                scheme: signature.scheme.into(),
-                signer: signature.signer.address(),
-                msg: signature.msg,
-                signature: (!signature.signature.is_empty() || u8::from(signature.scheme) == 0)
-                    .then_some(&signature.signature),
-            })
-            .collect();
-
         Transaction {
             chain_id: self.chain_id,
             nonce: self.nonce,
             nonce_keys: self.nonce_keys.clone(),
             sender: self.sender,
             frames,
-            signatures,
             max_priority_fee_per_gas: self.fees.max_priority_fee_per_gas,
             max_fee: self.fees.max_fee,
             blob_versioned_hashes: &self.blob_versioned_hashes,
@@ -281,7 +278,6 @@ impl<'de> serde::Deserialize<'de> for TxEip8141 {
             nonce_keys: Option<Vec<U256>>,
             sender: Address,
             frames: Vec<Frame>,
-            signatures: Vec<FrameSignature>,
             fees: TransactionFees,
             blob_versioned_hashes: Vec<B256>,
         }
@@ -318,21 +314,8 @@ impl<'de> serde::Deserialize<'de> for TxEip8141 {
             if let Some(sender) = object.remove("from") {
                 object.insert("sender".to_owned(), sender);
             }
-            if let Some(signatures) =
-                object.get_mut("signatures").and_then(serde_json::Value::as_array_mut)
-            {
-                for signature in signatures {
-                    let signature = signature.as_object_mut().ok_or("expected signature object")?;
-                    signature
-                        .entry("signer")
-                        .or_insert_with(|| serde_json::Value::String("0x".to_owned()));
-                    signature
-                        .entry("signature")
-                        .or_insert_with(|| serde_json::Value::String("0x".to_owned()));
-                    signature
-                        .entry("msg")
-                        .or_insert_with(|| serde_json::Value::String("0x".to_owned()));
-                }
+            if object.contains_key("signatures") {
+                return Err("EIP-8141 proof transactions have no signatures field");
             }
             if object.get("fees").is_none() {
                 let mut fees = serde_json::Map::new();
@@ -354,7 +337,6 @@ impl<'de> serde::Deserialize<'de> for TxEip8141 {
                 nonce_keys: tx.nonce_keys,
                 sender: tx.sender,
                 frames: tx.frames,
-                signatures: tx.signatures,
                 fees: tx.fees,
                 blob_versioned_hashes: tx.blob_versioned_hashes,
             });
@@ -369,7 +351,6 @@ impl<'de> serde::Deserialize<'de> for TxEip8141 {
             nonce_keys: tx.nonce_keys,
             sender: tx.sender,
             frames: tx.frames,
-            signatures: tx.signatures,
             fees: tx.fees,
             blob_versioned_hashes: tx.blob_versioned_hashes,
         })
@@ -1052,7 +1033,6 @@ impl TxEip8141 {
             nonce: self.nonce,
             nonce_keys: self.nonce_keys.as_deref(),
             frames: &self.frames,
-            signatures: &self.signatures,
             fees: &self.fees,
             blob_versioned_hashes: &self.blob_versioned_hashes,
         }
@@ -1071,7 +1051,6 @@ impl TxEip8141 {
             + self.nonce.length()
             + self.sender.length()
             + self.frames.length()
-            + self.signatures.length()
             + self.fees.length()
             + self.blob_versioned_hashes.length()
     }
@@ -1085,7 +1064,6 @@ impl TxEip8141 {
         self.nonce.encode(out);
         self.sender.encode(out);
         self.frames.encode(out);
-        self.signatures.encode(out);
         self.fees.encode(out);
         self.blob_versioned_hashes.encode(out);
     }
@@ -1123,7 +1101,6 @@ impl TxEip8141 {
             nonce,
             sender: Decodable::decode(buf)?,
             frames: Decodable::decode(buf)?,
-            signatures: Decodable::decode(buf)?,
             fees: Decodable::decode(buf)?,
             blob_versioned_hashes: Decodable::decode(buf)?,
         };
@@ -1159,16 +1136,15 @@ impl TxEip8141 {
 
     /// Encodes the transaction for EIP-8141 signature hashing.
     ///
-    /// Empty-`msg` signature bytes are replaced by their byte length as an RLP integer.
+    /// Proof bytes are replaced by their length, plus their digest when committed.
     pub fn encode_for_signing(&self, out: &mut dyn BufMut) {
         out.put_u8(Self::tx_type());
-        let signatures = SigningFrameSignatures(&self.signatures);
+        let frames = SigningFrames(&self.frames);
         let payload_length = self.chain_id.length()
             + self.nonce_keys.as_ref().map_or(0, Encodable::length)
             + self.nonce.length()
             + self.sender.length()
-            + self.frames.length()
-            + signatures.length()
+            + frames.length()
             + self.fees.length()
             + self.blob_versioned_hashes.length();
         Header { list: true, payload_length }.encode(out);
@@ -1178,21 +1154,19 @@ impl TxEip8141 {
         }
         self.nonce.encode(out);
         self.sender.encode(out);
-        self.frames.encode(out);
-        signatures.encode(out);
+        frames.encode(out);
         self.fees.encode(out);
         self.blob_versioned_hashes.encode(out);
     }
 
     /// Returns the length of the EIP-8141 signature payload.
     pub fn payload_len_for_signature(&self) -> usize {
-        let signatures = SigningFrameSignatures(&self.signatures);
+        let frames = SigningFrames(&self.frames);
         let payload_length = self.chain_id.length()
             + self.nonce_keys.as_ref().map_or(0, Encodable::length)
             + self.nonce.length()
             + self.sender.length()
-            + self.frames.length()
-            + signatures.length()
+            + frames.length()
             + self.fees.length()
             + self.blob_versioned_hashes.length();
         1 + Header { list: true, payload_length }.length_with_payload()
@@ -1249,11 +1223,6 @@ impl TxEip8141 {
         self.as_frame_ref().total_frame_state_gas_limit()
     }
 
-    /// See [`TxEip8141Ref::signature_verification_gas`].
-    pub fn signature_verification_gas(&self) -> u64 {
-        self.as_frame_ref().signature_verification_gas()
-    }
-
     /// See [`TxEip8141Ref::value_transfer_gas`].
     pub fn value_transfer_gas(&self) -> u64 {
         self.as_frame_ref().value_transfer_gas()
@@ -1295,10 +1264,8 @@ impl TxEip8141 {
         size_of::<Self>()
             + self.nonce_keys.as_ref().map_or(0, |keys| keys.capacity() * size_of::<U256>())
             + self.frames.capacity() * size_of::<Frame>()
-            + self.signatures.capacity() * size_of::<FrameSignature>()
             + self.blob_versioned_hashes.capacity() * size_of::<B256>()
             + self.frames.iter().map(|frame| frame.data.len()).sum::<usize>()
-            + self.signatures.iter().map(|signature| signature.signature.len()).sum::<usize>()
     }
 }
 
@@ -1313,8 +1280,6 @@ pub struct TxEip8141Ref<'a> {
     pub nonce_keys: Option<&'a [U256]>,
     /// Frame list.
     pub frames: &'a [Frame],
-    /// Signature list.
-    pub signatures: &'a [FrameSignature],
     /// Fee parameters.
     pub fees: &'a TransactionFees,
     /// Blob hashes.
@@ -1328,15 +1293,15 @@ impl TxEip8141Ref<'_> {
     /// method only rejects malformed transactions that must not reach signing, pooling, or
     /// execution.
     pub fn validate(&self) -> Result<(), &'static str> {
-        self.validate_inner(false)
+        self.validate_inner()
     }
 
-    /// Validates an unsigned envelope, allowing empty protocol signature placeholders.
+    /// Validates an unsigned envelope without executing its proof verifiers.
     pub fn validate_unsigned(&self) -> Result<(), &'static str> {
-        self.validate_inner(true)
+        self.validate_inner()
     }
 
-    fn validate_inner(&self, allow_placeholders: bool) -> Result<(), &'static str> {
+    fn validate_inner(&self) -> Result<(), &'static str> {
         if let Some(keys) = self.nonce_keys {
             validate_nonce_keys(keys)?;
         }
@@ -1353,27 +1318,7 @@ impl TxEip8141Ref<'_> {
             return Err("EIP-8250 legacy nonce sequence is exhausted");
         }
 
-        for signature in self.signatures {
-            if allow_placeholders
-                && u8::from(signature.scheme) != 0
-                && signature.signature.is_empty()
-            {
-                continue;
-            }
-            signature.validate_structure_with_sender(self.sender).map_err(|err| match err {
-                Eip8141Error::UnexpectedSigner => {
-                    "arbitrary signatures must not contain signer metadata"
-                }
-                Eip8141Error::InvalidSignatureLength { .. } => "invalid frame signature length",
-                Eip8141Error::InvalidParity(_) | Eip8141Error::InvalidSignatureScalar => {
-                    "frame signature is not canonical"
-                }
-                Eip8141Error::P256SignerMismatch { .. } => {
-                    "P-256 public key does not match the resolved signer"
-                }
-                _ => "invalid frame signature entry",
-            })?;
-        }
+        validate_proof_prefix(self.frames).map_err(|_| "invalid EIP-8141 proof prefix")?;
 
         let mut expiry_verifiers = 0u8;
         for (index, frame) in self.frames.iter().enumerate() {
@@ -1426,10 +1371,6 @@ impl TxEip8141Ref<'_> {
         }
 
         validate_frame_gas_limits(self.frames)?;
-        let _ = self
-            .signature_verification_gas()
-            .checked_add(self.value_transfer_gas())
-            .ok_or("frame intrinsic gas overflows u64")?;
         if self
             .calculate_execution_gas_limit_with_token_cost(FRAME_TX_DATA_TOKEN_STANDARD_COST)
             .max(self.calculate_calldata_floor())
@@ -1457,13 +1398,6 @@ impl TxEip8141Ref<'_> {
         self.frames.iter().fold(0u64, |acc, frame| acc.saturating_add(frame.limits.state))
     }
 
-    /// Returns the gas charged for protocol validation of all signature entries.
-    pub fn signature_verification_gas(&self) -> u64 {
-        self.signatures
-            .iter()
-            .fold(0u64, |acc, signature| acc.saturating_add(signature.verification_gas()))
-    }
-
     /// Returns the intrinsic value-transfer cost for frames with an explicit non-sender target.
     pub fn value_transfer_gas(&self) -> u64 {
         self.frames.iter().fold(0u64, |acc, frame| {
@@ -1479,26 +1413,23 @@ impl TxEip8141Ref<'_> {
 
     /// Returns the EIP-7623 token count of the frame transaction's charged byte fields.
     ///
-    /// Only frame data and signature signer, message, and signature bytes are charged. RLP
-    /// headers and fixed-size frame and signature fields are covered by the intrinsic and
-    /// per-frame costs. Zero bytes count as one token and non-zero bytes count as four tokens.
+    /// Frame and nonce data are charged. Proof bytes always count as four tokens each;
+    /// other bytes count as one token when zero and four otherwise. RLP headers are excluded.
     pub fn frame_calldata_tokens(&self) -> u64 {
-        let frame_tokens = self
-            .frames
-            .iter()
-            .fold(0u64, |acc, frame| acc.saturating_add(count_frame_data_tokens(&frame.data)));
+        let frame_tokens = self.frames.iter().fold(0u64, |acc, frame| {
+            let tokens = if frame.mode == FrameMode::Proof {
+                let split = frame.data.len().min(64);
+                count_frame_data_tokens(&frame.data[..split])
+                    .saturating_add(((frame.data.len() - split) as u64).saturating_mul(4))
+            } else {
+                count_frame_data_tokens(&frame.data)
+            };
+            acc.saturating_add(tokens)
+        });
         let nonce_tokens = self
             .nonce_keys
             .map_or(0, |keys| count_frame_data_tokens(&nonce_calldata(keys, self.nonce)));
-        self.signatures.iter().fold(frame_tokens.saturating_add(nonce_tokens), |acc, signature| {
-            acc.saturating_add(count_frame_data_tokens(signature.signer.as_bytes()))
-                .saturating_add(count_frame_data_tokens(signature.msg.as_bytes()))
-                .saturating_add(if signature.signs_transaction_hash() {
-                    (signature.signature.len() as u64).saturating_mul(4)
-                } else {
-                    count_frame_data_tokens(&signature.signature)
-                })
-        })
+        frame_tokens.saturating_add(nonce_tokens)
     }
 
     /// Returns the byte length of the frame transaction's charged byte fields.
@@ -1507,11 +1438,7 @@ impl TxEip8141Ref<'_> {
             self.frames.iter().fold(0u64, |acc, frame| acc.saturating_add(frame.data.len() as u64));
         let nonce_len =
             self.nonce_keys.map_or(0, |keys| nonce_calldata(keys, self.nonce).len() as u64);
-        self.signatures.iter().fold(frame_data_len.saturating_add(nonce_len), |acc, signature| {
-            acc.saturating_add(signature.signer.as_bytes().len() as u64)
-                .saturating_add(signature.msg.as_bytes().len() as u64)
-                .saturating_add(signature.signature.len() as u64)
-        })
+        frame_data_len.saturating_add(nonce_len)
     }
 
     /// Calculates the execution gas portion with the provided calldata token gas cost.
@@ -1520,7 +1447,6 @@ impl TxEip8141Ref<'_> {
             .saturating_add((self.frames.len() as u64).saturating_mul(FRAME_TX_PER_FRAME_COST))
             .saturating_add(self.keyed_nonce_access_gas())
             .saturating_add(self.frame_calldata_tokens().saturating_mul(data_token_cost))
-            .saturating_add(self.signature_verification_gas())
             .saturating_add(self.value_transfer_gas())
             .saturating_add(self.total_frame_execution_gas_limit())
     }
@@ -1543,7 +1469,6 @@ impl TxEip8141Ref<'_> {
         FRAME_TX_INTRINSIC_COST
             .saturating_add((self.frames.len() as u64).saturating_mul(FRAME_TX_PER_FRAME_COST))
             .saturating_add(self.keyed_nonce_access_gas())
-            .saturating_add(self.signature_verification_gas())
             .saturating_add(self.value_transfer_gas())
             // EIP-7976 charges every calldata byte as four floor tokens.
             .saturating_add(
@@ -1762,7 +1687,7 @@ fn validate_frame_gas_limits(frames: &[Frame]) -> Result<(), &'static str> {
 #[cfg(all(feature = "serde", feature = "serde-bincode-compat"))]
 pub(super) mod serde_bincode_compat {
     use alloc::{borrow::Cow, vec::Vec};
-    use alloy_eips::eip8141::{Frame, FrameSignature, TransactionFees};
+    use alloy_eips::eip8141::{Frame, TransactionFees};
     use alloy_primitives::{Address, ChainId, B256, U256};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use serde_with::{DeserializeAs, SerializeAs};
@@ -1789,7 +1714,6 @@ pub(super) mod serde_bincode_compat {
         nonce_keys: Option<Vec<U256>>,
         sender: Address,
         frames: Cow<'a, [Frame]>,
-        signatures: Cow<'a, [FrameSignature]>,
         fees: TransactionFees,
         blob_versioned_hashes: Cow<'a, [B256]>,
     }
@@ -1802,7 +1726,6 @@ pub(super) mod serde_bincode_compat {
                 nonce_keys: value.nonce_keys.clone(),
                 sender: value.sender,
                 frames: Cow::Borrowed(value.frames.as_slice()),
-                signatures: Cow::Borrowed(value.signatures.as_slice()),
                 fees: value.fees,
                 blob_versioned_hashes: Cow::Borrowed(value.blob_versioned_hashes.as_slice()),
             }
@@ -1817,7 +1740,6 @@ pub(super) mod serde_bincode_compat {
                 nonce_keys: value.nonce_keys,
                 sender: value.sender,
                 frames: value.frames.into_owned(),
-                signatures: value.signatures.into_owned(),
                 fees: value.fees,
                 blob_versioned_hashes: value.blob_versioned_hashes.into_owned(),
             }
@@ -1882,10 +1804,9 @@ mod tests {
     use crate::{EthereumTxEnvelope, TxEip4844};
     use alloy_eips::eip8141::{
         constants::{ATOMIC_BATCH_FLAG, EXPIRY_DATA_LENGTH, EXPIRY_VERIFIER},
-        ApprovalScope, FrameAddress, FrameLimits, FrameMode, SignatureMessage, SignatureScheme,
-        TransactionFees,
+        ApprovalScope, FrameAddress, FrameLimits, FrameMode, TransactionFees,
     };
-    use alloy_primitives::{Address, Bytes, B256, U256};
+    use alloy_primitives::{Address, Bytes, U256};
 
     #[test]
     fn arbitrary_frame_budgets_roundtrip() {
@@ -2035,36 +1956,19 @@ mod tests {
 
     #[test]
     fn validates_protocol_signature_structure() {
-        let mut secp256k1 = vec![0u8; 65];
-        secp256k1[32] = 1;
-        secp256k1[64] = 1;
         let mut tx = valid_tx();
-        tx.signatures.push(FrameSignature {
-            scheme: SignatureScheme::Secp256k1,
-            signer: FrameAddress::Empty,
-            msg: SignatureMessage::TransactionHash,
-            signature: secp256k1.into(),
-        });
-        assert!(tx.validate().is_ok());
-
-        let mut p256 = vec![0u8; 128];
-        p256[31] = 1;
-        p256[63] = 1;
-        p256[64..].fill(0x33);
-        tx.signatures[0] = FrameSignature {
-            scheme: SignatureScheme::P256,
-            signer: Address::from_raw_public_key(&[0x33; 64]).into(),
-            msg: SignatureMessage::TransactionHash,
-            signature: p256.into(),
-        };
-        assert!(tx.validate().is_ok());
-
-        tx.signatures[0].signer = Address::repeat_byte(0x22).into();
-        assert!(tx.validate().is_err());
-
-        tx.signatures[0].signer = FrameAddress::Empty;
-        tx.signatures[0].signature = Bytes::from(vec![0x33; 64]);
-        assert!(tx.validate().is_err());
+        let mut data = vec![0; 64];
+        data[0] = 1;
+        tx.frames.insert(
+            0,
+            Frame { mode: FrameMode::Proof, data: Bytes::from(data), ..Default::default() },
+        );
+        assert_eq!(tx.validate(), Ok(()));
+        tx.frames.swap(0, 1);
+        assert_eq!(tx.validate(), Err("invalid EIP-8141 proof prefix"));
+        tx.frames.swap(0, 1);
+        tx.frames[0].limits.state = 1;
+        assert_eq!(tx.validate(), Err("invalid EIP-8141 proof prefix"));
     }
 
     #[test]
@@ -2187,12 +2091,6 @@ mod tests {
                 value: U256::ZERO,
                 data: Bytes::new(),
             }],
-            signatures: vec![FrameSignature {
-                scheme: SignatureScheme::Secp256k1,
-                signer: Address::repeat_byte(0x11).into(),
-                msg: SignatureMessage::TransactionHash,
-                signature: Bytes::copy_from_slice(&[0x22; 65]),
-            }],
             fees: TransactionFees {
                 max_priority_fee_per_gas: U256::from(1),
                 max_fee: U256::from(10),
@@ -2224,12 +2122,6 @@ mod tests {
                 value: U256::from(9),
                 data: Bytes::from_static(&[0xaa]),
             }],
-            signatures: vec![FrameSignature {
-                scheme: SignatureScheme::Secp256k1,
-                signer: FrameAddress::Empty,
-                msg: SignatureMessage::TransactionHash,
-                signature: Bytes::from_static(&[0xbb]),
-            }],
             fees: TransactionFees {
                 max_priority_fee_per_gas: U256::from(1),
                 max_fee: U256::from(10),
@@ -2239,7 +2131,6 @@ mod tests {
 
         let json = serde_json::to_value(&tx).unwrap();
         let frame = &json["frames"][0];
-        let signature = &json["signatures"][0];
         assert_eq!(json["chainId"], "0x1");
         assert_eq!(frame["mode"], "0x1");
         assert_eq!(frame["flags"], "0x2");
@@ -2251,70 +2142,96 @@ mod tests {
         assert_eq!(json["maxFee"], "0xa");
         assert!(json.get("maxFeePerGas").is_none());
         assert!(json.get("fees").is_none());
-        assert_eq!(signature["scheme"], "0x1");
-        assert!(signature.get("signer").is_none());
+        assert!(json.get("signatures").is_none());
         assert_eq!(serde_json::from_value::<TxEip8141>(json).unwrap(), tx);
     }
 
     #[test]
-    fn signature_hash_elides_transaction_hash_signatures() {
-        let mut tx = TxEip8141 {
+    fn keyed_proof_signing_payload_matches_independent_rlp_vector() {
+        let sender = Address::repeat_byte(0x11);
+        let mut data = sender.into_word().to_vec();
+        data.extend_from_slice(&[0; 32]);
+        data.extend_from_slice(&[7; 65]);
+        let tx = TxEip8141 {
             chain_id: 1,
-            nonce: 0,
-            nonce_keys: None,
-            sender: Address::from([0x11; 20]),
-            frames: Vec::new(),
-            signatures: vec![FrameSignature {
-                scheme: SignatureScheme::Arbitrary,
-                signer: FrameAddress::Empty,
-                msg: SignatureMessage::TransactionHash,
-                signature: Bytes::copy_from_slice(&[0x22; 32]),
-            }],
+            nonce: 7,
+            nonce_keys: Some(vec![]),
+            sender,
+            frames: vec![
+                Frame {
+                    mode: FrameMode::Proof,
+                    target: alloy_eips::eip8141::SECP256K1_VERIFIER.into(),
+                    limits: alloy_eips::eip8141::FrameLimits { execution: 3100, state: 0 },
+                    data: data.into(),
+                    ..Default::default()
+                },
+                Frame {
+                    mode: FrameMode::Verify,
+                    flags: 3,
+                    limits: alloy_eips::eip8141::FrameLimits { execution: 10000, state: 0 },
+                    data: Bytes::from_static(&[0]),
+                    ..Default::default()
+                },
+            ],
             fees: TransactionFees {
-                max_priority_fee_per_gas: U256::from(1),
-                max_fee: U256::from(10),
+                max_fee: U256::from(100000),
+                max_priority_fee_per_gas: U256::ONE,
             },
-            blob_versioned_hashes: Vec::new(),
+            ..Default::default()
         };
+        let mut encoded = Vec::new();
+        tx.encode_for_signing(&mut encoded);
+        // Independently encoded seven-field envelope; proof data is [claim, length].
+        assert_eq!(encoded, alloy_primitives::hex!("06f89001c007941111111111111111111111111111111111111111f86ff8620480940000000000000000000000000000000000000012c4820c1c8080f843b8400000000000000000000000001111111111111111111111111111111111111111000000000000000000000000000000000000000000000000000000000000000041ca010380c4822710808000c5830186a001c0"));
+    }
 
+    #[test]
+    fn signature_hash_elides_proof_bytes_and_binds_their_length() {
+        let mut data = vec![0x22; 96];
+        data[32..64].fill(0);
+        let mut tx = TxEip8141 {
+            frames: vec![Frame { mode: FrameMode::Proof, data: data.into(), ..Default::default() }],
+            ..Default::default()
+        };
         let first = tx.signature_hash();
-        tx.signatures[0].signature = Bytes::copy_from_slice(&[0x33; 32]);
-        let second = tx.signature_hash();
-
-        assert_eq!(first, second);
-        tx.signatures[0].signature = Bytes::copy_from_slice(&[0x33; 64]);
+        let first_tx = tx.tx_hash();
+        let tokens = tx.frame_calldata_tokens();
+        let mut data = tx.frames[0].data.to_vec();
+        data[64..].fill(0);
+        tx.frames[0].data = data.into();
+        assert_eq!(first, tx.signature_hash());
+        assert_ne!(first_tx, tx.tx_hash());
+        assert_eq!(tokens, tx.frame_calldata_tokens());
+        let mut data = tx.frames[0].data.to_vec();
+        data.push(0);
+        tx.frames[0].data = data.into();
         assert_ne!(first, tx.signature_hash());
     }
 
     #[test]
-    fn signing_encoding_elides_only_transaction_hash_signatures() {
-        let tx = TxEip8141 {
-            signatures: vec![
-                FrameSignature {
-                    scheme: SignatureScheme::Arbitrary,
-                    signer: FrameAddress::Empty,
-                    msg: SignatureMessage::TransactionHash,
-                    signature: Bytes::copy_from_slice(&[0x11; 64]),
-                },
-                FrameSignature {
-                    scheme: SignatureScheme::Arbitrary,
-                    signer: FrameAddress::Empty,
-                    msg: SignatureMessage::Explicit(B256::repeat_byte(0x22)),
-                    signature: Bytes::copy_from_slice(&[0x33; 64]),
-                },
-            ],
+    fn signing_encoding_elides_explicit_message_proofs_unless_committed() {
+        let mut data = vec![1; 96];
+        let mut tx = TxEip8141 {
+            frames: vec![Frame {
+                mode: FrameMode::Proof,
+                data: data.clone().into(),
+                ..Default::default()
+            }],
             ..Default::default()
         };
-        let mut reference = tx.clone();
-        reference.signatures[0].signature = Bytes::from_static(&[64]);
-
-        let mut expected = Vec::new();
-        reference.eip2718_encode(&mut expected);
-        let mut actual = Vec::new();
-        tx.encode_for_signing(&mut actual);
-
-        assert_eq!(actual, expected);
-        assert_eq!(tx.payload_len_for_signature(), actual.len());
+        let uncommitted = tx.signature_hash();
+        data[64..].fill(2);
+        tx.frames[0].data = data.clone().into();
+        assert_eq!(uncommitted, tx.signature_hash());
+        tx.frames[0].flags = alloy_eips::eip8141::PROOF_COMMIT_FLAG;
+        let committed = tx.signature_hash();
+        data[64..].fill(3);
+        tx.frames[0].data = data.into();
+        assert_ne!(committed, tx.signature_hash());
+        let mut encoded = Vec::new();
+        tx.encode_for_signing(&mut encoded);
+        assert_eq!(tx.payload_len_for_signature(), encoded.len());
+        assert_eq!(keccak256(encoded), tx.signature_hash());
     }
 
     #[test]
@@ -2347,20 +2264,11 @@ mod tests {
     }
 
     #[test]
-    fn size_includes_nested_frame_and_signature_bytes() {
-        let empty = TxEip8141 {
-            frames: vec![Frame::default()],
-            signatures: vec![FrameSignature::default()],
-            ..Default::default()
-        };
+    fn size_includes_nested_frame_bytes() {
+        let empty = TxEip8141 { frames: vec![Frame::default()], ..Default::default() };
         let mut populated = empty.clone();
-        populated.frames[0].target = Address::repeat_byte(0x11).into();
         populated.frames[0].data = Bytes::copy_from_slice(&[0x22; 128]);
-        populated.signatures[0].signer = Address::repeat_byte(0x33).into();
-        populated.signatures[0].msg = SignatureMessage::Explicit(B256::repeat_byte(0x44));
-        populated.signatures[0].signature = Bytes::copy_from_slice(&[0x55; 65]);
-
-        assert_eq!(populated.size() - empty.size(), 128 + 65);
+        assert_eq!(populated.size() - empty.size(), 128);
     }
 
     #[test]
@@ -2406,34 +2314,23 @@ mod tests {
                     ..Default::default()
                 },
             ],
-            signatures: vec![FrameSignature {
-                scheme: SignatureScheme::Secp256k1,
-                signer: Address::repeat_byte(0x11).into(),
-                msg: SignatureMessage::TransactionHash,
-                signature: Bytes::copy_from_slice(&[0x22; 65]),
-            }],
             ..Default::default()
         };
 
-        let calldata_tokens = count_frame_data_tokens(&[0, 1, 2])
-            + count_frame_data_tokens(&[0x11; 20])
-            + count_frame_data_tokens(&[0x22; 65]);
-        let calldata_len = 3 + 20 + 65;
+        let calldata_tokens = count_frame_data_tokens(&[0, 1, 2]);
+        let calldata_len = 3;
         let expected = FRAME_TX_INTRINSIC_COST
             + 2 * FRAME_TX_PER_FRAME_COST
             + calldata_tokens * FRAME_TX_DATA_TOKEN_STANDARD_COST
-            + 2_800
             + 37;
 
         assert_eq!(tx.total_frame_gas_limit(), 37);
         assert_eq!(tx.total_frame_execution_gas_limit(), 30);
         assert_eq!(tx.total_frame_state_gas_limit(), 7);
-        assert_eq!(tx.signature_verification_gas(), 2_800);
         assert_eq!(tx.frame_calldata_tokens(), calldata_tokens);
         assert_eq!(tx.frame_calldata_len(), calldata_len);
         let floor = FRAME_TX_INTRINSIC_COST
             + 2 * FRAME_TX_PER_FRAME_COST
-            + 2_800
             + calldata_len * 4 * FRAME_TX_TOTAL_COST_FLOOR_PER_TOKEN;
         let floor_with_state = floor + tx.total_frame_state_gas_limit();
         assert_eq!(tx.calculate_gas_limit(), expected.max(floor_with_state));
@@ -2489,7 +2386,6 @@ mod tests {
                 value: U256::MAX,
                 data: Bytes::new(),
             }],
-            signatures: Vec::new(),
             ..Default::default()
         };
 
