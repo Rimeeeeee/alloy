@@ -1,15 +1,15 @@
 use super::SignableTransaction;
 use crate::{
-    Signed, TransactionEnvelope, TxEip1559, TxEip2930, TxEip4844WithSidecar, TxEip7702, TxEip8141,
-    TxLegacy,
     error::ValueError,
     transaction::{
-        RlpEcdsaEncodableTx, TxHashRef,
         eip4844::{TxEip4844, TxEip4844Variant},
+        RlpEcdsaEncodableTx, TxHashRef,
     },
+    Signed, TransactionEnvelope, TxEip1559, TxEip2930, TxEip4844WithSidecar, TxEip7702, TxEip8141,
+    TxLegacy,
 };
 use alloy_eips::{eip2718::Encodable2718, eip7594::Encodable7594};
-use alloy_primitives::{B256, Bytes, Sealed, Signature};
+use alloy_primitives::{Bytes, Sealed, Signature, B256};
 
 /// The Ethereum [EIP-2718] Transaction Envelope.
 ///
@@ -978,8 +978,8 @@ pub mod serde_bincode_compat {
     ///
     /// Intended to use with the [`serde_with::serde_as`] macro in the following way:
     /// ```rust
-    /// use alloy_consensus::{EthereumTxEnvelope, serde_bincode_compat};
-    /// use serde::{Deserialize, Serialize, de::DeserializeOwned};
+    /// use alloy_consensus::{serde_bincode_compat, EthereumTxEnvelope};
+    /// use serde::{de::DeserializeOwned, Deserialize, Serialize};
     /// use serde_with::serde_as;
     ///
     /// #[serde_as]
@@ -1093,7 +1093,7 @@ pub mod serde_bincode_compat {
 
     #[cfg(test)]
     mod tests {
-        use super::super::{EthereumTxEnvelope, serde_bincode_compat};
+        use super::super::{serde_bincode_compat, EthereumTxEnvelope};
         use crate::TxEip4844;
         bincode_compat_roundtrip_test!(
             test_typed_tx_envelope_bincode_roundtrip,
@@ -1109,8 +1109,8 @@ mod tests {
     #[cfg(any(feature = "secp256k1", feature = "k256"))]
     use crate::transaction::SignerRecoverable;
     use crate::{
-        Transaction, TxEip4844, TxEip4844WithSidecar,
         transaction::{PooledTransaction, Recovered, SignableTransaction},
+        Transaction, TxEip4844, TxEip4844WithSidecar,
     };
     use alloc::vec::Vec;
     use alloy_eips::{
@@ -1120,9 +1120,9 @@ mod tests {
         eip7594::BlobTransactionSidecarVariant,
         eip7702::Authorization,
     };
-    use alloy_primitives::{Address, Signature, U256, hex};
     #[allow(unused_imports)]
-    use alloy_primitives::{Bytes, TxKind, b256};
+    use alloy_primitives::{b256, Bytes, TxKind};
+    use alloy_primitives::{hex, Address, Signature, U256};
     use alloy_rlp::Decodable;
     use std::{fs, path::PathBuf, str::FromStr, vec};
 
@@ -1175,58 +1175,46 @@ mod tests {
     #[test]
     fn test_is_replay_protected_v() {
         let sig = Signature::test_signature();
-        assert!(
-            !&TxEnvelope::Legacy(Signed::new_unchecked(
-                TxLegacy::default(),
-                sig,
-                Default::default(),
-            ))
-            .is_replay_protected()
-        );
+        assert!(!&TxEnvelope::Legacy(Signed::new_unchecked(
+            TxLegacy::default(),
+            sig,
+            Default::default(),
+        ))
+        .is_replay_protected());
         let r = b256!("840cfc572845f5786e702984c2a582528cad4b49b2a10b9db1be7fca90058565");
         let s = b256!("25e7109ceb98168d95b09b18bbf6b685130e0562f233877d492b94eee0c5b6d1");
         let v = false;
         let valid_sig = Signature::from_scalars_and_parity(r, s, v);
-        assert!(
-            !&TxEnvelope::Legacy(Signed::new_unchecked(
-                TxLegacy::default(),
-                valid_sig,
-                Default::default(),
-            ))
-            .is_replay_protected()
-        );
-        assert!(
-            &TxEnvelope::Eip2930(Signed::new_unchecked(
-                TxEip2930::default(),
-                sig,
-                Default::default(),
-            ))
-            .is_replay_protected()
-        );
-        assert!(
-            &TxEnvelope::Eip1559(Signed::new_unchecked(
-                TxEip1559::default(),
-                sig,
-                Default::default(),
-            ))
-            .is_replay_protected()
-        );
-        assert!(
-            &TxEnvelope::Eip4844(Signed::new_unchecked(
-                TxEip4844Variant::TxEip4844(TxEip4844::default()),
-                sig,
-                Default::default(),
-            ))
-            .is_replay_protected()
-        );
-        assert!(
-            &TxEnvelope::Eip7702(Signed::new_unchecked(
-                TxEip7702::default(),
-                sig,
-                Default::default(),
-            ))
-            .is_replay_protected()
-        );
+        assert!(!&TxEnvelope::Legacy(Signed::new_unchecked(
+            TxLegacy::default(),
+            valid_sig,
+            Default::default(),
+        ))
+        .is_replay_protected());
+        assert!(&TxEnvelope::Eip2930(Signed::new_unchecked(
+            TxEip2930::default(),
+            sig,
+            Default::default(),
+        ))
+        .is_replay_protected());
+        assert!(&TxEnvelope::Eip1559(Signed::new_unchecked(
+            TxEip1559::default(),
+            sig,
+            Default::default(),
+        ))
+        .is_replay_protected());
+        assert!(&TxEnvelope::Eip4844(Signed::new_unchecked(
+            TxEip4844Variant::TxEip4844(TxEip4844::default()),
+            sig,
+            Default::default(),
+        ))
+        .is_replay_protected());
+        assert!(&TxEnvelope::Eip7702(Signed::new_unchecked(
+            TxEip7702::default(),
+            sig,
+            Default::default(),
+        ))
+        .is_replay_protected());
     }
 
     #[test]
@@ -2222,7 +2210,7 @@ mod fuzz_tests {
     use alloy_eips::eip2718::Decodable2718;
     use alloy_rlp::{Decodable, Header};
     use arbitrary::{Arbitrary, Unstructured};
-    use rand::{Rng, RngCore, SeedableRng, rngs::StdRng};
+    use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
 
     fn arbitrary_envelope(seed: u64) -> EthereumTxEnvelope<TxEip4844> {
         let mut bytes = [0u8; 16 * 1024];

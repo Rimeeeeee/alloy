@@ -1,24 +1,24 @@
 //! Alloy basic Transaction Request type.
 
-use crate::{FrameRequest, Transaction, TransactionTrait, transaction::AccessList};
+use crate::{transaction::AccessList, FrameRequest, Transaction, TransactionTrait};
 use alloc::{
     string::{String, ToString},
     vec,
     vec::Vec,
 };
 use alloy_consensus::{
+    error::ValueError,
+    transaction::{Recovered, TxEip8141WithSidecar},
     BlobTransactionSidecarEip7594, BlobTransactionSidecarVariant, SignableTransaction, TxEip1559,
     TxEip2930, TxEip4844, TxEip4844Variant, TxEip4844WithSidecar, TxEip7702, TxEip8141, TxEnvelope,
     TxLegacy, TxType, Typed2718, TypedTransaction,
-    error::ValueError,
-    transaction::{Recovered, TxEip8141WithSidecar},
 };
 use alloy_eips::{
     eip7702::SignedAuthorization,
     eip8141::{Frame, FrameSignature, TransactionFees},
 };
 use alloy_network_primitives::{TransactionBuilder4844, TransactionBuilder7702};
-use alloy_primitives::{Address, B256, Bytes, ChainId, Signature, TxKind, U256};
+use alloy_primitives::{Address, Bytes, ChainId, Signature, TxKind, B256, U256};
 use core::{hash::Hash, str::FromStr};
 
 #[cfg(feature = "serde")]
@@ -1168,7 +1168,11 @@ impl TransactionRequest {
             missing.push("max_fee_per_blob_gas");
         }
 
-        if missing.is_empty() { Ok(()) } else { Err(missing) }
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(missing)
+        }
     }
 
     /// Check if all necessary keys are present to build a 1559 transaction,
@@ -1176,7 +1180,11 @@ impl TransactionRequest {
     pub fn complete_1559(&self) -> Result<(), Vec<&'static str>> {
         let mut missing = self.check_reqd_fields();
         self.check_1559_fields(&mut missing);
-        if missing.is_empty() { Ok(()) } else { Err(missing) }
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(missing)
+        }
     }
 
     /// Check if all necessary keys are present to build a 2930 transaction,
@@ -1189,7 +1197,11 @@ impl TransactionRequest {
             missing.push("access_list");
         }
 
-        if missing.is_empty() { Ok(()) } else { Err(missing) }
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(missing)
+        }
     }
 
     /// Check if all necessary keys are present to build a 7702 transaction,
@@ -1206,7 +1218,11 @@ impl TransactionRequest {
             missing.push("authorization_list");
         }
 
-        if missing.is_empty() { Ok(()) } else { Err(missing) }
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(missing)
+        }
     }
 
     /// Checks frame request completeness and structure, returning the first missing or invalid
@@ -1221,7 +1237,11 @@ impl TransactionRequest {
         let mut missing = self.check_reqd_fields();
         self.check_legacy_fields(&mut missing);
 
-        if missing.is_empty() { Ok(()) } else { Err(missing) }
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(missing)
+        }
     }
 
     /// Return the tx type this request can be built as. Computed by checking
@@ -1598,7 +1618,11 @@ impl From<TxEnvelope> for TransactionRequest {
                 {
                     let from = tx.recover_signer().ok();
                     let tx: Self = tx.strip_signature().into();
-                    if let Some(from) = from { tx.from(from) } else { tx }
+                    if let Some(from) = from {
+                        tx.from(from)
+                    } else {
+                        tx
+                    }
                 }
 
                 #[cfg(not(feature = "k256"))]
@@ -1611,7 +1635,11 @@ impl From<TxEnvelope> for TransactionRequest {
                 {
                     let from = tx.recover_signer().ok();
                     let tx: Self = tx.strip_signature().into();
-                    if let Some(from) = from { tx.from(from) } else { tx }
+                    if let Some(from) = from {
+                        tx.from(from)
+                    } else {
+                        tx
+                    }
                 }
 
                 #[cfg(not(feature = "k256"))]
@@ -1624,7 +1652,11 @@ impl From<TxEnvelope> for TransactionRequest {
                 {
                     let from = tx.recover_signer().ok();
                     let tx: Self = tx.strip_signature().into();
-                    if let Some(from) = from { tx.from(from) } else { tx }
+                    if let Some(from) = from {
+                        tx.from(from)
+                    } else {
+                        tx
+                    }
                 }
 
                 #[cfg(not(feature = "k256"))]
@@ -1637,7 +1669,11 @@ impl From<TxEnvelope> for TransactionRequest {
                 {
                     let from = tx.recover_signer().ok();
                     let tx: Self = tx.strip_signature().into();
-                    if let Some(from) = from { tx.from(from) } else { tx }
+                    if let Some(from) = from {
+                        tx.from(from)
+                    } else {
+                        tx
+                    }
                 }
 
                 #[cfg(not(feature = "k256"))]
@@ -1650,7 +1686,11 @@ impl From<TxEnvelope> for TransactionRequest {
                 {
                     let from = tx.recover_signer().ok();
                     let tx: Self = tx.strip_signature().into();
-                    if let Some(from) = from { tx.from(from) } else { tx }
+                    if let Some(from) = from {
+                        tx.from(from)
+                    } else {
+                        tx
+                    }
                 }
 
                 #[cfg(not(feature = "k256"))]
@@ -1672,7 +1712,7 @@ pub(super) mod serde_bincode_compat {
         eip2930::AccessList,
         eip8141::{FrameAddress, FrameMode, FrameSignature},
     };
-    use alloy_primitives::{Address, B256, Bytes, ChainId, TxKind, U256};
+    use alloy_primitives::{Address, Bytes, ChainId, TxKind, B256, U256};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use serde_with::{DeserializeAs, SerializeAs};
 
@@ -1680,7 +1720,7 @@ pub(super) mod serde_bincode_compat {
     ///
     /// Intended to use with the [serde_with::serde_as] macro in the following way:
     /// ```rust
-    /// use alloy_rpc_types_eth::{TransactionRequest, serde_bincode_compat, transaction};
+    /// use alloy_rpc_types_eth::{serde_bincode_compat, transaction, TransactionRequest};
     /// use serde::{Deserialize, Serialize};
     /// use serde_with::serde_as;
     ///
@@ -1875,7 +1915,7 @@ pub(super) mod serde_bincode_compat {
         use alloy_primitives::U256;
         use arbitrary::Arbitrary;
         use bincode::config;
-        use rand::{Rng, SeedableRng, rngs::StdRng};
+        use rand::{rngs::StdRng, Rng, SeedableRng};
         use serde::{Deserialize, Serialize};
         use serde_with::serde_as;
 
@@ -2245,7 +2285,7 @@ mod tests {
     use super::*;
     use crate::Authorization;
     use alloy_consensus::BlobTransactionSidecarEip7594;
-    use alloy_eips::eip4844::{Blob, BlobTransactionSidecar, Bytes48, kzg_to_versioned_hash};
+    use alloy_eips::eip4844::{kzg_to_versioned_hash, Blob, BlobTransactionSidecar, Bytes48};
     use alloy_primitives::b256;
     #[cfg(feature = "serde")]
     use alloy_serde::WithOtherFields;

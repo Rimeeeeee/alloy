@@ -817,6 +817,7 @@ where
         match self.fill(tx).await? {
             // A local signer (e.g. `WalletFiller`) already produced the signed envelope.
             SendableTx::Envelope(envelope) => Ok(envelope.encoded_2718().into()),
+            SendableTx::EnvelopeWithSidecar { encoded, .. } => Ok(encoded),
             SendableTx::Builder(tx) => {
                 if let FillerControlFlow::Missing(missing) = self.filler.status(&tx) {
                     let message = format!("missing properties: {missing:?}");
@@ -1184,6 +1185,38 @@ mod tests {
             alloy_consensus::transaction::SignerRecoverable::recover_signer(&envelope).unwrap(),
             from
         );
+    }
+
+    #[tokio::test]
+    async fn sign_transaction_preserves_frame_sidecar_bytes() {
+        let asserter = alloy_transport::mock::Asserter::new();
+        let signer = alloy_signer_local::PrivateKeySigner::random();
+        let sender = signer.address();
+        let provider = crate::ProviderBuilder::new()
+            .disable_recommended_fillers()
+            .wallet(signer)
+            .connect_mocked_client(asserter.clone());
+        let sidecar = alloy_eips::eip7594::BlobTransactionSidecarEip7594::new(
+            vec![alloy_eips::eip4844::Blob::default()],
+            vec![alloy_eips::eip4844::Bytes48::default()],
+            vec![alloy_eips::eip4844::Bytes48::default(); alloy_eips::eip7594::CELLS_PER_EXT_BLOB],
+        );
+        let request = TransactionRequest {
+            transaction_type: Some(alloy_eips::eip8141::FRAME_TX_TYPE),
+            from: Some(sender),
+            chain_id: Some(1),
+            nonce: Some(7),
+            frames: Some(vec![alloy_eips::eip8141::Frame::default().into()]),
+            signatures: Some(vec![]),
+            max_fee: Some(U256::from(1_000_000)),
+            max_priority_fee_per_gas: Some(1),
+            sidecar: Some(sidecar.into()),
+            ..Default::default()
+        };
+        let expected = request.clone().build_8141_with_sidecar().unwrap().encoded_2718();
+        let signed = provider.sign_transaction(request).await.unwrap();
+        assert_eq!(signed.as_ref(), expected);
+        assert!(asserter.requests().is_empty());
     }
 
     #[tokio::test]

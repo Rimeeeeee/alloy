@@ -6,12 +6,12 @@ use alloy_consensus::{
 };
 use alloy_eips::eip2718::Encodable2718;
 use alloy_network_primitives::TransactionResponse;
-use alloy_primitives::{Address, B256, BlockHash, Bytes, ChainId, TxKind, U256};
+use alloy_primitives::{Address, BlockHash, Bytes, ChainId, TxKind, B256, U256};
 
 use alloy_consensus::transaction::Recovered;
 pub use alloy_consensus::{
-    BlobTransactionSidecar, BlobTransactionSidecarEip7594, Receipt, ReceiptEnvelope,
-    ReceiptWithBloom, Transaction as TransactionTrait, transaction::TransactionInfo,
+    transaction::TransactionInfo, BlobTransactionSidecar, BlobTransactionSidecarEip7594, Receipt,
+    ReceiptEnvelope, ReceiptWithBloom, Transaction as TransactionTrait,
 };
 pub use alloy_consensus_any::AnyReceiptEnvelope;
 pub use alloy_eips::{

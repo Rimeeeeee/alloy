@@ -3,7 +3,7 @@
 use crate::Signed;
 use alloc::{borrow::Cow, vec::Vec};
 use alloy_eips::{eip2930::AccessList, eip4844::DATA_GAS_PER_BLOB, eip7702::SignedAuthorization};
-use alloy_primitives::{Address, B256, Bytes, ChainId, Selector, TxHash, TxKind, U256, keccak256};
+use alloy_primitives::{keccak256, Address, Bytes, ChainId, Selector, TxHash, TxKind, B256, U256};
 use auto_impl::auto_impl;
 use core::{any, fmt};
 
@@ -36,9 +36,8 @@ pub use eip4844_sidecar::TxEip4844Sidecar;
 
 // Re-export 4844 helpers.
 pub use alloy_eips::eip4844::{
-    Blob, BlobTransactionSidecar, Bytes48,
     builder::{SidecarBuilder, SidecarCoder, SimpleCoder},
-    utils as eip4844_utils,
+    utils as eip4844_utils, Blob, BlobTransactionSidecar, Bytes48,
 };
 
 pub mod pooled;
@@ -50,7 +49,7 @@ pub use pooled::{
 pub use either::Either;
 
 mod legacy;
-pub use legacy::{TxLegacy, from_eip155_value, to_eip155_value};
+pub use legacy::{from_eip155_value, to_eip155_value, TxLegacy};
 
 mod rlp;
 #[doc(hidden)]

@@ -1,19 +1,18 @@
 use crate::{
-    Eip658Value, Eip2718DecodableReceipt, Eip2718EncodableReceipt, FrameReceiptEnvelope,
+    Eip2718DecodableReceipt, Eip2718EncodableReceipt, Eip658Value, FrameReceiptEnvelope,
     InMemorySize, Receipt, ReceiptWithBloom, RlpDecodableReceipt, RlpEncodableReceipt, TxReceipt,
     TxType,
 };
 use alloc::vec::Vec;
 use alloy_eips::{
-    Typed2718,
     eip2718::{
-        Decodable2718, EIP1559_TX_TYPE_ID, EIP2930_TX_TYPE_ID, EIP4844_TX_TYPE_ID,
-        EIP7702_TX_TYPE_ID, Eip2718Error, Eip2718Result, Encodable2718, IsTyped2718,
-        LEGACY_TX_TYPE_ID,
+        Decodable2718, Eip2718Error, Eip2718Result, Encodable2718, IsTyped2718, EIP1559_TX_TYPE_ID,
+        EIP2930_TX_TYPE_ID, EIP4844_TX_TYPE_ID, EIP7702_TX_TYPE_ID, LEGACY_TX_TYPE_ID,
     },
-    eip8141::{FrameReceiptPayload, FrameStatus, constants::FRAME_TX_TYPE},
+    eip8141::{constants::FRAME_TX_TYPE, FrameReceiptPayload, FrameStatus},
+    Typed2718,
 };
-use alloy_primitives::{Bloom, Log, logs_bloom};
+use alloy_primitives::{logs_bloom, Bloom, Log};
 use alloy_rlp::{BufMut, Decodable, Encodable, Header};
 use core::fmt;
 
@@ -696,8 +695,8 @@ pub(crate) mod serde_bincode_compat {
     ///
     /// Intended to use with the [`serde_with::serde_as`] macro in the following way:
     /// ```rust
-    /// use alloy_consensus::{ReceiptEnvelope, serde_bincode_compat};
-    /// use serde::{Deserialize, Serialize, de::DeserializeOwned};
+    /// use alloy_consensus::{serde_bincode_compat, ReceiptEnvelope};
+    /// use serde::{de::DeserializeOwned, Deserialize, Serialize};
     /// use serde_with::serde_as;
     ///
     /// #[serde_as]
@@ -819,7 +818,7 @@ pub(crate) mod serde_bincode_compat {
 
     #[cfg(test)]
     mod tests {
-        use super::super::{ReceiptEnvelope, serde_bincode_compat};
+        use super::super::{serde_bincode_compat, ReceiptEnvelope};
         use alloy_primitives::Log;
         use arbitrary::Arbitrary;
         use bincode::config;
@@ -865,7 +864,7 @@ mod test {
     use alloy_eips::{
         eip2718::{Decodable2718, Eip2718Error, Encodable2718},
         eip8141::{
-            FrameGasUsed, FrameReceipt, FrameReceiptPayload, FrameStatus, constants::FRAME_TX_TYPE,
+            constants::FRAME_TX_TYPE, FrameGasUsed, FrameReceipt, FrameReceiptPayload, FrameStatus,
         },
     };
     use alloy_primitives::{Address, Bloom, Log};
@@ -954,7 +953,7 @@ mod test {
     #[test]
     fn deser_receipt_envelope_shapes() {
         use crate::{Eip658Value, ReceiptWithBloom};
-        use alloy_primitives::{B256, Bloom, b256};
+        use alloy_primitives::{b256, Bloom, B256};
 
         const ROOT: B256 =
             b256!("284d35bf53b82ef480ab4208527325477439c64fb90ef518450f05ee151c8e10");

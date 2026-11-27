@@ -2,24 +2,23 @@ use alloc::{borrow::ToOwned, string::ToString, vec::Vec};
 use core::{fmt, mem::size_of};
 
 use alloy_eips::{
-    Decodable2718, Encodable2718, Typed2718,
     eip2718::{Eip2718Error, Eip2718Result, IsTyped2718},
     eip4844::VERSIONED_HASH_VERSION_KZG,
     eip7594::{Decodable7594, Encodable7594, MAX_BLOBS_PER_TX_FUSAKA},
     eip7702::SignedAuthorization,
     eip7825::MAX_TX_GAS_LIMIT_OSAKA,
     eip8141::{
-        ApprovalScope, Eip8141Error, Frame, FrameLimits, FrameMode, FrameSignature,
-        SignatureMessage, TransactionFees,
         constants::{
             FRAME_TX_DATA_TOKEN_STANDARD_COST, FRAME_TX_INTRINSIC_COST, FRAME_TX_PER_FRAME_COST,
             FRAME_TX_TOTAL_COST_FLOOR_PER_TOKEN, FRAME_TX_TYPE, MAX_FRAMES, TX_VALUE_COST,
         },
-        has_valid_assertion_suffix,
+        has_valid_assertion_suffix, ApprovalScope, Eip8141Error, Frame, FrameLimits, FrameMode,
+        FrameSignature, SignatureMessage, TransactionFees,
     },
-    eip8250::{KEYED_NONCE_ACCESS_COST, MAX_NONCE_SEQ, nonce_calldata, validate_nonce_keys},
+    eip8250::{nonce_calldata, validate_nonce_keys, KEYED_NONCE_ACCESS_COST, MAX_NONCE_SEQ},
+    Decodable2718, Encodable2718, Typed2718,
 };
-use alloy_primitives::{Address, B256, Bytes, ChainId, Sealable, TxKind, U256, keccak256};
+use alloy_primitives::{keccak256, Address, Bytes, ChainId, Sealable, TxKind, B256, U256};
 use alloy_rlp::{BufMut, Decodable, Encodable, Header};
 
 use crate::Transaction;
@@ -1907,7 +1906,7 @@ const fn validate_execution_gas(execution: u64) -> Result<(), TxEip8141Validatio
 pub(super) mod serde_bincode_compat {
     use alloc::{borrow::Cow, vec::Vec};
     use alloy_eips::eip8141::{Frame, FrameSignature, TransactionFees};
-    use alloy_primitives::{Address, B256, ChainId, U256};
+    use alloy_primitives::{Address, ChainId, B256, U256};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use serde_with::{DeserializeAs, SerializeAs};
 
@@ -1915,7 +1914,7 @@ pub(super) mod serde_bincode_compat {
     ///
     /// Intended to use with the [`serde_with::serde_as`] macro in the following way:
     /// ```rust
-    /// use alloy_consensus::{TxEip8141, serde_bincode_compat};
+    /// use alloy_consensus::{serde_bincode_compat, TxEip8141};
     /// use serde::{Deserialize, Serialize};
     /// use serde_with::serde_as;
     ///
@@ -1994,7 +1993,7 @@ pub(super) mod serde_bincode_compat {
         use serde::{Deserialize, Serialize};
         use serde_with::serde_as;
 
-        use super::super::{TxEip8141, serde_bincode_compat};
+        use super::super::{serde_bincode_compat, TxEip8141};
 
         #[test]
         fn test_tx_eip8141_bincode_roundtrip() {
@@ -2025,11 +2024,11 @@ mod tests {
     use super::*;
     use crate::{EthereumTxEnvelope, TxEip4844};
     use alloy_eips::eip8141::{
+        constants::{ATOMIC_BATCH_FLAG, EXPIRY_DATA_LENGTH, EXPIRY_VERIFIER},
         ApprovalScope, FrameAddress, FrameLimits, FrameMode, SignatureMessage, SignatureScheme,
         TransactionFees,
-        constants::{ATOMIC_BATCH_FLAG, EXPIRY_DATA_LENGTH, EXPIRY_VERIFIER},
     };
-    use alloy_primitives::{Address, B256, Bytes, U256};
+    use alloy_primitives::{Address, Bytes, B256, U256};
 
     #[test]
     fn arbitrary_frame_budgets_roundtrip() {
@@ -2653,14 +2652,14 @@ mod upstream_tests {
     use alloy_eips::{
         eip2718::{Decodable2718, Encodable2718},
         eip8141::{
-            EXPIRY_VERIFIER, FrameAddress, SECP256K1N, SECP256R1N, SignatureMessage,
-            SignatureScheme,
+            FrameAddress, SignatureMessage, SignatureScheme, EXPIRY_VERIFIER, SECP256K1N,
+            SECP256R1N,
         },
     };
 
     use alloy_primitives::hex;
     use arbitrary::{Arbitrary, Unstructured};
-    use rand::{RngCore, SeedableRng, rngs::StdRng};
+    use rand::{rngs::StdRng, RngCore, SeedableRng};
 
     fn valid_tx() -> TxEip8141 {
         TxEip8141 { chain_id: 1, frames: vec![Frame::default()], ..Default::default() }
