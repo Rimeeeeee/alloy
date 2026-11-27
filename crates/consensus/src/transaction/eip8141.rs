@@ -6,85 +6,119 @@ use core::{fmt, mem::size_of};
 #[cfg(feature = "serde")]
 use alloy_eips::eip8141::SignatureMessage;
 use alloy_eips::{
+    Decodable2718, Encodable2718, Typed2718,
     eip2718::{Eip2718Error, Eip2718Result, IsTyped2718},
-    eip7594::{Decodable7594, Encodable7594},
+    eip4844::VERSIONED_HASH_VERSION_KZG,
+    eip7594::{Decodable7594, Encodable7594, MAX_BLOBS_PER_TX_FUSAKA},
     eip7702::SignedAuthorization,
     eip7825::MAX_TX_GAS_LIMIT_OSAKA,
     eip8141::{
+        ApprovalScope, Eip8141Error, Frame, FrameLimits, FrameMode, FrameSignature,
+        SigningFrameSignatures, TransactionFees,
         constants::{
             FRAME_TX_DATA_TOKEN_STANDARD_COST, FRAME_TX_INTRINSIC_COST, FRAME_TX_PER_FRAME_COST,
             FRAME_TX_TOTAL_COST_FLOOR_PER_TOKEN, FRAME_TX_TYPE, MAX_FRAMES, TX_VALUE_COST,
         },
-        has_valid_assertion_suffix, ApprovalScope, Eip8141Error, Frame, FrameMode, FrameSignature,
-        TransactionFees,
+        has_valid_assertion_suffix,
     },
-    eip8250::{nonce_calldata, validate_nonce_keys, KEYED_NONCE_ACCESS_COST},
+    eip8250::{KEYED_NONCE_ACCESS_COST, nonce_calldata, validate_nonce_keys},
     eip8288::{
-        DependencyValidationError, SignatureDependencies, SignatureDependency, DEPENDENCY_BYTES,
-        LEANSTARK_VERIFICATION_GAS,
+        DEPENDENCY_BYTES, DependencyValidationError, LEANSTARK_VERIFICATION_GAS,
+        SignatureDependencies, SignatureDependency,
     },
-    Decodable2718, Encodable2718, Typed2718,
 };
-use alloy_primitives::{keccak256, Address, Bytes, ChainId, Sealable, TxKind, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, ChainId, Sealable, TxKind, U256, keccak256};
 use alloy_rlp::{BufMut, Decodable, Encodable, Header};
 
 use crate::Transaction;
 
+/// A structural validation error in an EIP-8141 transaction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum TxEip8141ValidationError {
+    /// The EIP-8250 nonce key set is not canonical.
+    #[error("invalid EIP-8250 nonce keys: {0}")]
+    NonceKeys(&'static str),
+    /// The number of frames is outside the permitted range.
+    #[error("expected between 1 and {MAX_FRAMES} frames, got {0}")]
+    FrameCount(usize),
+    /// An empty nonce key list selects an exhausted legacy account nonce.
+    #[error("EIP-8250 legacy nonce sequence is exhausted")]
+    ExhaustedLegacyNonce,
+    /// Assertion frames must form a contiguous trailing suffix.
+    #[error("EIP-7906 ASSERT frames must form a trailing suffix")]
+    AssertionSuffix,
+    /// The transaction exceeds the per-transaction blob limit.
+    #[error("expected at most {MAX_BLOBS_PER_TX_FUSAKA} blobs, got {0}")]
+    BlobCount(usize),
+    /// A blob hash uses an unsupported version.
+    #[error("blob {index} has unsupported version {version}")]
+    BlobVersion {
+        /// Index of the blob hash.
+        index: usize,
+        /// Version byte of the blob hash.
+        version: u8,
+    },
+    /// A signature's metadata or canonical scalar checks failed.
+    #[error("invalid signature {index}: {source}")]
+    Signature {
+        /// Index of the signature.
+        index: usize,
+        /// The underlying signature error.
+        source: Eip8141Error,
+    },
+    /// A frame sets reserved flags.
+    #[error("frame {index} has reserved flags: {flags}")]
+    ReservedFlags {
+        /// Index of the frame.
+        index: usize,
+        /// Frame flags.
+        flags: u8,
+    },
+    /// Only sender frames may carry value.
+    #[error("frame {index} carries value outside sender mode")]
+    ValueOutsideSenderFrame {
+        /// Index of the frame.
+        index: usize,
+    },
+    /// Execution approval is only allowed at the transaction sender.
+    #[error("frame {index} allows execution approval at a target other than the sender")]
+    ExecutionApprovalTarget {
+        /// Index of the frame.
+        index: usize,
+    },
+    /// An atomic batch flag lacks a following non-verify frame or is set on a verify frame.
+    #[error("invalid atomic batch flag on frame {index}")]
+    AtomicBatch {
+        /// Index of the frame.
+        index: usize,
+    },
+    /// Frames in an atomic batch cannot approve execution or payment.
+    #[error("frame {index} allows approval inside an atomic batch")]
+    ApprovalInAtomicBatch {
+        /// Index of the frame, including the terminating frame of a batch.
+        index: usize,
+    },
+    /// An expiry verifier has invalid fields or follows another expiry verifier.
+    #[error("invalid or duplicate expiry verifier at frame {index}")]
+    ExpiryVerifier {
+        /// Index of the frame.
+        index: usize,
+    },
+    /// A dependency frame violates the EIP-8288 declaration constraints.
+    #[error("invalid EIP-8288 dependency frame at index {index}")]
+    DependencyFrame {
+        /// Index of the dependency frame.
+        index: usize,
+    },
+    /// The sum of frame execution and state budgets overflows a `u64`.
+    #[error("total frame gas overflows u64")]
+    FrameGasOverflow,
+    /// The execution reservation exceeds the transaction execution gas cap.
+    #[error("execution gas {0} exceeds {MAX_TX_GAS_LIMIT_OSAKA}")]
+    ExecutionGasLimit(u64),
+}
+
 static EMPTY_INPUT: Bytes = Bytes::new();
-
-struct SigningFrameSignature<'a>(&'a FrameSignature);
-
-impl Encodable for SigningFrameSignature<'_> {
-    fn encode(&self, out: &mut dyn BufMut) {
-        let signature = self.0;
-        Header { list: true, payload_length: self.payload_length() }.encode(out);
-        signature.scheme.encode(out);
-        signature.signer.encode(out);
-        signature.msg.encode(out);
-        if signature.signs_transaction_hash() {
-            signature.signature.len().encode(out);
-        } else {
-            signature.signature.encode(out);
-        }
-    }
-
-    fn length(&self) -> usize {
-        Header { list: true, payload_length: self.payload_length() }.length_with_payload()
-    }
-}
-
-impl SigningFrameSignature<'_> {
-    fn payload_length(&self) -> usize {
-        let signature = self.0;
-        signature.scheme.length()
-            + signature.signer.length()
-            + signature.msg.length()
-            + if signature.signs_transaction_hash() {
-                signature.signature.len().length()
-            } else {
-                signature.signature.length()
-            }
-    }
-}
-
-struct SigningFrameSignatures<'a>(&'a [FrameSignature]);
-
-impl Encodable for SigningFrameSignatures<'_> {
-    fn encode(&self, out: &mut dyn BufMut) {
-        let payload_length =
-            self.0.iter().map(|signature| SigningFrameSignature(signature).length()).sum();
-        Header { list: true, payload_length }.encode(out);
-        for signature in self.0 {
-            SigningFrameSignature(signature).encode(out);
-        }
-    }
-
-    fn length(&self) -> usize {
-        let payload_length =
-            self.0.iter().map(|signature| SigningFrameSignature(signature).length()).sum();
-        Header { list: true, payload_length }.length_with_payload()
-    }
-}
 
 /// Counts frame transaction calldata tokens.
 ///
@@ -1067,8 +1101,24 @@ impl TxEip8141 {
     }
 
     /// Validates the structural constraints without executing a frame.
-    pub fn validate(&self) -> Result<(), &'static str> {
+    pub fn validate(&self) -> Result<(), TxEip8141ValidationError> {
         self.as_frame_ref().validate()
+    }
+
+    /// Returns execution and state reservations, including intrinsic costs and the calldata floor.
+    pub fn gas_limits(&self) -> FrameLimits {
+        FrameLimits {
+            execution: self
+                .calculate_execution_gas_limit_with_token_cost(FRAME_TX_DATA_TOKEN_STANDARD_COST)
+                .max(self.calculate_calldata_floor()),
+            state: self.total_frame_state_gas_limit(),
+        }
+    }
+
+    /// Returns the total execution and state reservation with saturating arithmetic.
+    pub fn gas_limit(&self) -> u64 {
+        let limits = self.gas_limits();
+        limits.execution.saturating_add(limits.state)
     }
 
     /// Outputs the length of the transaction's fields, without an RLP header.
@@ -1170,7 +1220,7 @@ impl TxEip8141 {
     /// Empty-`msg` signature bytes are replaced by their byte length as an RLP integer.
     pub fn encode_for_signing(&self, out: &mut dyn BufMut) {
         out.put_u8(Self::tx_type());
-        let signatures = SigningFrameSignatures(&self.signatures);
+        let signatures = SigningFrameSignatures::new(&self.signatures);
         let payload_length = self.chain_id.length()
             + self.nonce_keys.as_ref().map_or(0, Encodable::length)
             + self.nonce.length()
@@ -1194,7 +1244,7 @@ impl TxEip8141 {
 
     /// Returns the length of the EIP-8141 signature payload.
     pub fn payload_len_for_signature(&self) -> usize {
-        let signatures = SigningFrameSignatures(&self.signatures);
+        let signatures = SigningFrameSignatures::new(&self.signatures);
         let payload_length = self.chain_id.length()
             + self.nonce_keys.as_ref().map_or(0, Encodable::length)
             + self.nonce.length()
@@ -1392,55 +1442,42 @@ impl TxEip8141Ref<'_> {
     /// Cryptographic signature validity is checked by the selected frame validation scheme. This
     /// method only rejects malformed transactions that must not reach signing, pooling, or
     /// execution.
-    pub fn validate(&self) -> Result<(), &'static str> {
+    pub fn validate(&self) -> Result<(), TxEip8141ValidationError> {
         self.validate_inner(false)
     }
 
     /// Validates an unsigned envelope, allowing empty protocol signature placeholders.
-    pub fn validate_unsigned(&self) -> Result<(), &'static str> {
+    pub fn validate_unsigned(&self) -> Result<(), TxEip8141ValidationError> {
         self.validate_inner(true)
     }
 
-    fn validate_inner(&self, allow_placeholders: bool) -> Result<(), &'static str> {
+    fn validate_inner(&self, allow_placeholders: bool) -> Result<(), TxEip8141ValidationError> {
         if let Some(keys) = self.nonce_keys {
-            validate_nonce_keys(keys)?;
+            validate_nonce_keys(keys).map_err(TxEip8141ValidationError::NonceKeys)?;
         }
-        if self.frames.is_empty() || self.frames.len() > MAX_FRAMES {
-            return Err("EIP-8141 transaction must contain between 1 and 64 frames");
-        }
-        if !has_valid_assertion_suffix(self.frames) {
-            return Err("EIP-7906 ASSERT frames must form a trailing suffix");
-        }
-        if self.blob_versioned_hashes.iter().any(|hash| hash[0] != 0x01) {
-            return Err("invalid EIP-4844 versioned hash");
-        }
+        validate_frame_count(self.frames.len())?;
         if self.nonce == u64::MAX && self.nonce_keys.is_none_or(|keys| keys.is_empty()) {
-            return Err("EIP-8250 legacy nonce sequence is exhausted");
+            return Err(TxEip8141ValidationError::ExhaustedLegacyNonce);
         }
-
-        for signature in self.signatures {
+        validate_blobs(self.blob_versioned_hashes)?;
+        for (index, signature) in self.signatures.iter().enumerate() {
             if allow_placeholders
                 && u8::from(signature.scheme) != 0
                 && signature.signature.is_empty()
             {
                 continue;
             }
-            signature.validate_structure_with_sender(self.sender).map_err(|err| match err {
-                Eip8141Error::UnexpectedSigner => {
-                    "arbitrary signatures must not contain signer metadata"
-                }
-                Eip8141Error::InvalidSignatureLength { .. } => "invalid frame signature length",
-                Eip8141Error::InvalidParity(_) | Eip8141Error::InvalidSignatureScalar => {
-                    "frame signature is not canonical"
-                }
-                Eip8141Error::P256SignerMismatch { .. } => {
-                    "P-256 public key does not match the resolved signer"
-                }
-                _ => "invalid frame signature entry",
-            })?;
+            if signature.explicit_message().is_some_and(|msg| msg.is_zero()) {
+                return Err(TxEip8141ValidationError::Signature {
+                    index,
+                    source: Eip8141Error::ZeroMessage,
+                });
+            }
+            signature
+                .validate_structure_with_sender(self.sender)
+                .map_err(|source| TxEip8141ValidationError::Signature { index, source })?;
         }
-
-        let mut expiry_verifiers = 0u8;
+        // Dependency declarations have stricter fields and cannot participate in an atomic batch.
         for (index, frame) in self.frames.iter().enumerate() {
             if frame.mode == FrameMode::DependencyVerify {
                 SignatureDependencies::from_frame(
@@ -1448,69 +1485,14 @@ impl TxEip8141Ref<'_> {
                     index > 0 && self.frames[index - 1].is_atomic_batch(),
                 )
                 .and_then(SignatureDependencies::validate)
-                .map_err(|_| "invalid EIP-8288 dependency frame")?;
-            }
-            if frame.has_reserved_flags() {
-                return Err("reserved EIP-8141 frame flag is set");
-            }
-            if frame.is_assert() && frame.is_atomic_batch() {
-                return Err("EIP-7906 atomic flag is invalid on ASSERT frames");
-            }
-            if frame.is_assert()
-                && index
-                    .checked_sub(1)
-                    .is_some_and(|previous| self.frames[previous].is_atomic_batch())
-            {
-                return Err("EIP-7906 atomic batch cannot end on an ASSERT frame");
-            }
-            if !frame.value.is_zero() && frame.mode != FrameMode::Sender {
-                return Err("frame value is only valid in sender mode");
-            }
-            if matches!(
-                frame.allowed_scope(),
-                ApprovalScope::Execution | ApprovalScope::ExecutionAndPayment
-            ) && frame.resolved_target(self.sender) != self.sender
-            {
-                return Err("execution approval target must resolve to the transaction sender");
-            }
-            if frame.is_atomic_batch()
-                && (frame.mode == FrameMode::Verify
-                    || index + 1 == self.frames.len()
-                    || self.frames[index + 1].mode == FrameMode::Verify)
-            {
-                return Err("invalid atomic EIP-8141 frame");
-            }
-            let is_atomic_batch_member = frame.is_atomic_batch()
-                || index
-                    .checked_sub(1)
-                    .is_some_and(|previous| self.frames[previous].is_atomic_batch());
-            if is_atomic_batch_member && frame.allowed_scope() != ApprovalScope::None {
-                return Err("atomic batch frames must not approve payment or execution");
-            }
-            if frame.is_expiry_verifier() {
-                expiry_verifiers = expiry_verifiers.saturating_add(1);
-                if expiry_verifiers > 1 {
-                    return Err("EIP-8141 transaction may contain at most one expiry verifier");
-                }
-                if !frame.has_valid_expiry_verifier_fields() {
-                    return Err("invalid expiry verifier frame");
-                }
+                .map_err(|_| TxEip8141ValidationError::DependencyFrame { index })?;
             }
         }
-
-        validate_frame_gas_limits(self.frames)?;
-        let _ = self
-            .signature_verification_gas()
-            .checked_add(self.value_transfer_gas())
-            .ok_or("frame intrinsic gas overflows u64")?;
-        if self
-            .calculate_execution_gas_limit_with_token_cost(FRAME_TX_DATA_TOKEN_STANDARD_COST)
-            .max(self.calculate_calldata_floor())
-            > MAX_TX_GAS_LIMIT_OSAKA
-        {
-            return Err("EIP-8141 transaction exceeds the EIP-7825 execution gas cap");
-        }
-        Ok(())
+        validate_frames(self.frames, self.sender)?;
+        validate_execution_gas(
+            self.calculate_execution_gas_limit_with_token_cost(FRAME_TX_DATA_TOKEN_STANDARD_COST)
+                .max(self.calculate_calldata_floor()),
+        )
     }
 
     /// Returns the sum of all frame gas limits.
@@ -1735,11 +1717,11 @@ impl Transaction for TxEip8141 {
 
     #[inline]
     fn max_fee_per_blob_gas(&self) -> Option<u128> {
-        Some(u128::MAX)
+        (!self.blob_versioned_hashes.is_empty()).then_some(u128::MAX)
     }
 
     fn max_fee_per_blob_gas_u256(&self) -> Option<U256> {
-        Some(U256::MAX)
+        (!self.blob_versioned_hashes.is_empty()).then_some(U256::MAX)
     }
 
     #[inline]
@@ -1763,6 +1745,10 @@ impl Transaction for TxEip8141 {
     }
 
     #[inline]
+    fn effective_tip_per_gas(&self, base_fee: u64) -> Option<u128> {
+        self.effective_tip_per_gas_u256(base_fee).map(|tip| tip.saturating_to())
+    }
+
     fn is_dynamic_fee(&self) -> bool {
         true
     }
@@ -1845,12 +1831,123 @@ fn validate_frame_gas_limits(frames: &[Frame]) -> Result<(), &'static str> {
     Ok(())
 }
 
+const fn validate_frame_count(count: usize) -> Result<(), TxEip8141ValidationError> {
+    if count == 0 || count > MAX_FRAMES {
+        return Err(TxEip8141ValidationError::FrameCount(count));
+    }
+    Ok(())
+}
+
+fn validate_blobs(hashes: &[B256]) -> Result<(), TxEip8141ValidationError> {
+    use TxEip8141ValidationError as Error;
+
+    if hashes.len() as u64 > MAX_BLOBS_PER_TX_FUSAKA {
+        return Err(Error::BlobCount(hashes.len()));
+    }
+    for (index, hash) in hashes.iter().enumerate() {
+        if hash[0] != VERSIONED_HASH_VERSION_KZG {
+            return Err(Error::BlobVersion { index, version: hash[0] });
+        }
+    }
+    Ok(())
+}
+
+/// Checks frame fields and the rules that depend on surrounding frames.
+fn validate_frames(frames: &[Frame], sender: Address) -> Result<(), TxEip8141ValidationError> {
+    if !has_valid_assertion_suffix(frames) {
+        return Err(TxEip8141ValidationError::AssertionSuffix);
+    }
+    let mut frame_gas = 0;
+    let mut seen_expiry_verifier = false;
+    let mut previous_atomic = false;
+    for (index, frame) in frames.iter().enumerate() {
+        validate_frame_fields(frame, sender, index)?;
+        validate_atomic_batch(frame, frames.get(index + 1), previous_atomic, index)?;
+        validate_expiry_verifier(frame, seen_expiry_verifier, index)?;
+        frame_gas = checked_frame_gas(frame_gas, frame.limits)?;
+        previous_atomic = frame.is_atomic_batch();
+        seen_expiry_verifier |= frame.is_expiry_verifier();
+    }
+    Ok(())
+}
+
+fn validate_frame_fields(
+    frame: &Frame,
+    sender: Address,
+    index: usize,
+) -> Result<(), TxEip8141ValidationError> {
+    use TxEip8141ValidationError as Error;
+
+    if frame.has_reserved_flags() {
+        return Err(Error::ReservedFlags { index, flags: frame.flags });
+    }
+    if !frame.value.is_zero() && frame.mode != FrameMode::Sender {
+        return Err(Error::ValueOutsideSenderFrame { index });
+    }
+    if matches!(
+        frame.allowed_scope(),
+        ApprovalScope::Execution | ApprovalScope::ExecutionAndPayment
+    ) && frame.resolved_target(sender) != sender
+    {
+        return Err(Error::ExecutionApprovalTarget { index });
+    }
+    Ok(())
+}
+
+fn validate_atomic_batch(
+    frame: &Frame,
+    next: Option<&Frame>,
+    previous_atomic: bool,
+    index: usize,
+) -> Result<(), TxEip8141ValidationError> {
+    use TxEip8141ValidationError as Error;
+
+    let atomic = frame.is_atomic_batch();
+    if atomic
+        && (matches!(frame.mode, FrameMode::Verify | FrameMode::Assert)
+            || next.is_none_or(|next| matches!(next.mode, FrameMode::Verify | FrameMode::Assert)))
+    {
+        return Err(Error::AtomicBatch { index });
+    }
+    if (atomic || previous_atomic) && frame.allowed_scope() != ApprovalScope::None {
+        return Err(Error::ApprovalInAtomicBatch { index });
+    }
+    Ok(())
+}
+
+fn validate_expiry_verifier(
+    frame: &Frame,
+    seen_expiry_verifier: bool,
+    index: usize,
+) -> Result<(), TxEip8141ValidationError> {
+    if frame.is_expiry_verifier()
+        && (seen_expiry_verifier || !frame.has_valid_expiry_verifier_fields())
+    {
+        return Err(TxEip8141ValidationError::ExpiryVerifier { index });
+    }
+    Ok(())
+}
+
+fn checked_frame_gas(total: u64, limits: FrameLimits) -> Result<u64, TxEip8141ValidationError> {
+    total
+        .checked_add(limits.execution)
+        .and_then(|gas| gas.checked_add(limits.state))
+        .ok_or(TxEip8141ValidationError::FrameGasOverflow)
+}
+
+const fn validate_execution_gas(execution: u64) -> Result<(), TxEip8141ValidationError> {
+    if execution > MAX_TX_GAS_LIMIT_OSAKA {
+        return Err(TxEip8141ValidationError::ExecutionGasLimit(execution));
+    }
+    Ok(())
+}
+
 /// Bincode-compatible [`TxEip8141`] serde implementation.
 #[cfg(all(feature = "serde", feature = "serde-bincode-compat"))]
 pub(super) mod serde_bincode_compat {
     use alloc::{borrow::Cow, vec::Vec};
     use alloy_eips::eip8141::{Frame, FrameSignature, TransactionFees};
-    use alloy_primitives::{Address, ChainId, B256, U256};
+    use alloy_primitives::{Address, B256, ChainId, U256};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use serde_with::{DeserializeAs, SerializeAs};
 
@@ -1858,7 +1955,7 @@ pub(super) mod serde_bincode_compat {
     ///
     /// Intended to use with the [`serde_with::serde_as`] macro in the following way:
     /// ```rust
-    /// use alloy_consensus::{serde_bincode_compat, TxEip8141};
+    /// use alloy_consensus::{TxEip8141, serde_bincode_compat};
     /// use serde::{Deserialize, Serialize};
     /// use serde_with::serde_as;
     ///
@@ -1937,7 +2034,7 @@ pub(super) mod serde_bincode_compat {
         use serde::{Deserialize, Serialize};
         use serde_with::serde_as;
 
-        use super::super::{serde_bincode_compat, TxEip8141};
+        use super::super::{TxEip8141, serde_bincode_compat};
 
         #[test]
         fn test_tx_eip8141_bincode_roundtrip() {
@@ -1969,13 +2066,13 @@ mod tests {
     use crate::{EthereumTxEnvelope, TxEip4844};
     use alloy_eips::{
         eip8141::{
-            constants::{ATOMIC_BATCH_FLAG, EXPIRY_DATA_LENGTH, EXPIRY_VERIFIER},
             ApprovalScope, FrameAddress, FrameLimits, FrameMode, SignatureMessage, SignatureScheme,
             TransactionFees,
+            constants::{ATOMIC_BATCH_FLAG, EXPIRY_DATA_LENGTH, EXPIRY_VERIFIER},
         },
         eip8288::{LEANSPHINCS_SCHEME, LEANSPHINCS_VERIFICATION_GAS},
     };
-    use alloy_primitives::{Address, Bytes, B256, U256};
+    use alloy_primitives::{Address, B256, Bytes, U256};
 
     #[test]
     fn arbitrary_frame_budgets_roundtrip() {
@@ -2104,7 +2201,7 @@ mod tests {
                 TxEip8141::decode(&mut encoded.as_slice()),
                 Err(alloy_rlp::Error::Custom(reason))
             );
-            assert_eq!(tx.validate(), Err(reason));
+            assert_eq!(tx.validate(), Err(TxEip8141ValidationError::FrameGasOverflow));
             let mut typed = Vec::new();
             tx.encode_2718(&mut typed);
             assert!(
@@ -2187,15 +2284,14 @@ mod tests {
         assert!(tx.validate().is_ok());
 
         tx.frames.push(Frame::default());
-        assert_eq!(tx.validate(), Err("EIP-7906 ASSERT frames must form a trailing suffix"));
+        assert_eq!(tx.validate(), Err(TxEip8141ValidationError::AssertionSuffix));
 
         tx.frames = vec![Frame::default(), Frame { flags: ATOMIC_BATCH_FLAG, ..assertion }];
-        assert_eq!(tx.validate(), Err("EIP-7906 atomic flag is invalid on ASSERT frames"));
+        assert_eq!(tx.validate(), Err(TxEip8141ValidationError::AtomicBatch { index: 1 }));
     }
 
     #[test]
     fn rejects_atomic_batches_ending_on_assertion_after_wire_roundtrip() {
-        let reason = "EIP-7906 atomic batch cannot end on an ASSERT frame";
         for mode in [FrameMode::Default, FrameMode::Sender] {
             for prefix in [false, true] {
                 for flags in 0..=3 {
@@ -2205,6 +2301,8 @@ mod tests {
                         Frame { mode: FrameMode::Assert, flags, ..Default::default() },
                     ]);
                     let tx = TxEip8141 { frames, ..Default::default() };
+                    let reason =
+                        TxEip8141ValidationError::AtomicBatch { index: usize::from(prefix) };
                     assert_eq!(tx.validate(), Err(reason));
                     assert_eq!(tx.as_frame_ref().validate_unsigned(), Err(reason));
 
@@ -2422,7 +2520,10 @@ mod tests {
         assert_eq!(tx.max_fee_per_gas(), u128::MAX);
         assert_eq!(tx.max_fee_per_gas_u256(), tx.fees.max_fee / U256::from(tx.gas_limit()));
         assert_eq!(tx.max_priority_fee_per_gas_u256(), Some(tx.fees.max_priority_fee_per_gas));
-        assert_eq!(tx.max_fee_per_blob_gas_u256(), Some(U256::MAX));
+        assert_eq!(tx.max_fee_per_blob_gas_u256(), None);
+        let with_blob =
+            TxEip8141 { blob_versioned_hashes: vec![B256::repeat_byte(1)], ..tx.clone() };
+        assert_eq!(with_blob.max_fee_per_blob_gas_u256(), Some(U256::MAX));
         assert_eq!(tx.effective_gas_price_u256(Some(10)), expected_effective);
         assert_eq!(tx.effective_tip_per_gas_u256(10), Some(tx.fees.max_priority_fee_per_gas));
 
@@ -2664,11 +2765,11 @@ mod tests {
         };
         assert_eq!(tx.signature_dependencies().unwrap()[0], first);
         tx.frames[0].target = Address::ZERO.into();
-        assert_eq!(tx.validate(), Err("invalid EIP-8288 dependency frame"));
+        assert_eq!(tx.validate(), Err(TxEip8141ValidationError::DependencyFrame { index: 0 }));
         assert_eq!(tx.signature_dependencies(), Err(DependencyValidationError::FrameFields));
         tx.frames[0].target = Default::default();
         tx.frames.insert(0, Frame { flags: 4, ..Default::default() });
-        assert_eq!(tx.validate(), Err("invalid EIP-8288 dependency frame"));
+        assert_eq!(tx.validate(), Err(TxEip8141ValidationError::DependencyFrame { index: 1 }));
         assert_eq!(tx.signature_dependencies(), Err(DependencyValidationError::AtomicBatch));
     }
 

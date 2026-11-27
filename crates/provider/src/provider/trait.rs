@@ -1905,7 +1905,6 @@ impl<N: Network> Provider<N> for RootProvider<N> {
         self.inner.weak_client()
     }
 
-    #[inline]
     async fn watch_pending_transaction(
         &self,
         config: PendingTransactionConfig,
@@ -1942,7 +1941,8 @@ mod tests {
     use alloy_node_bindings::Anvil;
     use alloy_primitives::{address, b256, bytes, keccak256};
     use alloy_rpc_client::{BuiltInConnectionString, RpcClient};
-    use alloy_rpc_types_eth::{request::TransactionRequest, Block};
+    use alloy_rpc_types_eth::{request::TransactionRequest, Block, BlockOverrides, StateContext};
+    use alloy_serde::WithOtherFields;
     use alloy_signer_local::PrivateKeySigner;
     use alloy_transport::{
         layers::{RetryBackoffLayer, RetryPolicy},
@@ -2582,7 +2582,6 @@ mod tests {
 
     #[tokio::test]
     async fn any_network_wallet_filler() {
-        use alloy_serde::WithOtherFields;
         let anvil = Anvil::new().spawn();
         let signer: PrivateKeySigner =
             "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".parse().unwrap();
@@ -2630,8 +2629,6 @@ mod tests {
 
     #[tokio::test]
     async fn call_many_mainnet() {
-        use alloy_rpc_types_eth::{BlockOverrides, StateContext};
-
         let url = "https://docs-demo.quiknode.pro/";
         let provider = ProviderBuilder::new().connect_http(url.parse().unwrap());
         let tx1 = TransactionRequest::default()
@@ -2799,9 +2796,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_transaction_sync() {
-        use alloy_network::TransactionBuilder;
-        use alloy_primitives::{address, U256};
-
         let anvil = Anvil::new().spawn();
         let provider = ProviderBuilder::new().connect_http(anvil.endpoint_url());
 
@@ -2822,9 +2816,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_transaction_sync_with_fillers() {
-        use alloy_network::TransactionBuilder;
-        use alloy_primitives::{address, U256};
-
         let provider = ProviderBuilder::new().connect_anvil_with_wallet();
 
         // Create transaction without specifying gas or nonce - fillers should handle this
@@ -2849,9 +2840,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_fill_transaction() {
-        use alloy_network::TransactionBuilder;
-        use alloy_primitives::{address, U256};
-
         let provider = ProviderBuilder::new().connect_anvil_with_wallet();
 
         let tx = TransactionRequest::default()

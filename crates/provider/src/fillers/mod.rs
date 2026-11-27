@@ -14,14 +14,15 @@
 //! # Composing fillers
 //!
 //! To layer fillers, a utility filler is provided called [`JoinFill`], which is a composition of
-//! two fillers, left and right. The left filler is called before the right filler.
+//! two fillers, left and right. Ready fillers prepare concurrently, then apply their prepared
+//! values from left to right. Synchronous filling also runs from left to right.
 //!
 //! [`Provider`]: crate::Provider
 
 mod chain_id;
-use alloy_eips::{eip7928::BlockAccessList, BlockId, BlockNumberOrTag};
+use alloy_eips::{BlockId, BlockNumberOrTag, Encodable2718, eip7928::BlockAccessList};
 use alloy_primitives::{
-    Address, BlockHash, BlockNumber, StorageKey, StorageValue, TxHash, B256, U128, U256,
+    Address, B256, BlockHash, BlockNumber, StorageKey, StorageValue, TxHash, U128, U256,
 };
 use alloy_rpc_client::NoParams;
 #[cfg(feature = "pubsub")]
@@ -49,19 +50,18 @@ use tracing::error;
 #[cfg(feature = "pubsub")]
 use crate::GetSubscription;
 use crate::{
-    provider::SendableTx, EthCall, EthCallMany, EthGetBlock, FilterPollerBuilder, Identity,
-    PendingTransaction, PendingTransactionBuilder, PendingTransactionConfig,
-    PendingTransactionError, Provider, ProviderCall, ProviderLayer, RootProvider, RpcWithBlock,
-    SendableTxErr,
+    EthCall, EthCallMany, EthGetBlock, FilterPollerBuilder, Identity, PendingTransaction,
+    PendingTransactionBuilder, PendingTransactionConfig, PendingTransactionError, Provider,
+    ProviderCall, ProviderLayer, RootProvider, RpcWithBlock, SendableTxErr, provider::SendableTx,
 };
 use alloy_json_rpc::{RpcError, RpcRecv};
 use alloy_network::{AnyNetwork, Ethereum, Network};
 use alloy_primitives::{Bytes, U64};
 use alloy_rpc_types_eth::{
-    erc4337::TransactionConditional,
-    simulate::{SimulatePayload, SimulatedBlock},
     AccessListResult, EIP1186AccountProofResponse, EthCallResponse, FeeHistory, FillTransaction,
     Filter, FilterChanges, Log, StorageValuesRequest, StorageValuesResponse,
+    erc4337::TransactionConditional,
+    simulate::{SimulatePayload, SimulatedBlock},
 };
 use alloy_transport::{TransportError, TransportResult};
 use async_trait::async_trait;
@@ -135,7 +135,8 @@ impl FillerControlFlow {
         Self::Missing(vec![(name, missing)])
     }
 
-    /// Returns true if the filler is missing a required property.
+    /// Returns the filler names and their missing properties if this is [`Self::Missing`],
+    /// or `None` if this is [`Self::Ready`] or [`Self::Finished`].
     pub fn as_missing(&self) -> Option<&[(&'static str, Vec<&'static str>)]> {
         match self {
             Self::Missing(missing) => Some(missing),
@@ -812,9 +813,18 @@ where
     }
 
     async fn sign_transaction(&self, tx: N::TransactionRequest) -> TransportResult<Bytes> {
-        let tx = self.fill(tx).await?;
-        let tx = tx.try_into_request().map_err(TransportError::local_usage)?;
-        self.inner.sign_transaction(tx).await
+        match self.fill(tx).await? {
+            // A local signer (e.g. `WalletFiller`) already produced the signed envelope.
+            SendableTx::Envelope(envelope) => Ok(envelope.encoded_2718().into()),
+            SendableTx::EnvelopeWithSidecar { encoded, .. } => Ok(encoded),
+            SendableTx::Builder(tx) => {
+                if let FillerControlFlow::Missing(missing) = self.filler.status(&tx) {
+                    let message = format!("missing properties: {missing:?}");
+                    return Err(RpcError::local_usage_str(&message));
+                }
+                self.inner.sign_transaction(tx).await
+            }
+        }
     }
 
     async fn fill_transaction(
@@ -1044,8 +1054,8 @@ mod tests {
     use super::*;
     use alloy_rpc_types_eth::TransactionRequest;
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
 
     #[derive(Clone, Debug, Default)]
@@ -1143,5 +1153,54 @@ mod tests {
         assert!(matches!(err, RpcError::LocalUsageError(_)));
         assert!(err.to_string().contains("Tx filler loop detected"));
         assert_eq!(calls.load(Ordering::Relaxed), 20);
+    }
+
+    #[tokio::test]
+    async fn sign_transaction_with_wallet_returns_local_envelope() {
+        use alloy_eips::Decodable2718;
+
+        let asserter = alloy_transport::mock::Asserter::new();
+        let signer = alloy_signer_local::PrivateKeySigner::random();
+        let from = signer.address();
+        let provider =
+            crate::ProviderBuilder::new().wallet(signer).connect_mocked_client(asserter.clone());
+
+        let tx = TransactionRequest {
+            from: Some(from),
+            to: Some(Address::ZERO.into()),
+            nonce: Some(7),
+            chain_id: Some(1),
+            gas: Some(21_000),
+            max_fee_per_gas: Some(2),
+            max_priority_fee_per_gas: Some(1),
+            ..Default::default()
+        };
+        let raw = provider.sign_transaction(tx).await.unwrap();
+
+        assert!(asserter.requests().is_empty());
+        let envelope = <Ethereum as Network>::TxEnvelope::decode_2718(&mut raw.as_ref()).unwrap();
+        assert_eq!(alloy_consensus::Transaction::nonce(&envelope), 7);
+        assert_eq!(
+            alloy_consensus::transaction::SignerRecoverable::recover_signer(&envelope).unwrap(),
+            from
+        );
+    }
+
+    #[tokio::test]
+    async fn sign_transaction_rejects_incomplete_request() {
+        let asserter = alloy_transport::mock::Asserter::new();
+        let provider = crate::ProviderBuilder::new()
+            .disable_recommended_fillers()
+            .wallet(alloy_signer_local::PrivateKeySigner::random())
+            .connect_mocked_client(asserter.clone());
+
+        let tx = TransactionRequest { to: Some(Address::ZERO.into()), ..Default::default() };
+        let err = provider.sign_transaction(tx).await.unwrap_err();
+
+        assert!(asserter.requests().is_empty());
+        assert_eq!(
+            err.to_string(),
+            r#"local usage error: missing properties: [("Wallet", ["nonce", "gas_limit", "max_fee_per_gas", "max_priority_fee_per_gas"])]"#
+        );
     }
 }

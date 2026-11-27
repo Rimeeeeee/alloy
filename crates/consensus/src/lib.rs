@@ -28,7 +28,7 @@ macro_rules! bincode_compat_roundtrip_test {
         #[test]
         fn $name() {
             use arbitrary::Arbitrary;
-            use rand::{rngs::StdRng, Rng, SeedableRng};
+            use rand::{Rng, SeedableRng, rngs::StdRng};
 
             #[serde_with::serde_as]
             #[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -71,7 +71,7 @@ pub use constants::{EMPTY_OMMER_ROOT_HASH, EMPTY_ROOT_HASH};
 
 mod receipt;
 pub use receipt::{
-    Eip2718DecodableReceipt, Eip2718EncodableReceipt, Eip658Value, EthereumReceipt,
+    Eip658Value, Eip2718DecodableReceipt, Eip2718EncodableReceipt, EthereumReceipt,
     FrameReceiptEnvelope, Receipt, ReceiptEnvelope, ReceiptWithBloom, Receipts,
     RlpDecodableReceipt, RlpEncodableReceipt, TxReceipt, TxTy,
 };
@@ -88,16 +88,17 @@ pub use transaction::BlobTransactionValidationError;
 pub use transaction::{
     EthereumTxEnvelope, EthereumTypedTransaction, SignableTransaction, Transaction,
     TransactionEnvelope, TxEip1559, TxEip2930, TxEip4844, TxEip4844Variant, TxEip4844WithSidecar,
-    TxEip7702, TxEip8141, TxEnvelope, TxLegacy, TxType, TypedTransaction,
+    TxEip7702, TxEip8141, TxEip8141ValidationError, TxEnvelope, TxLegacy, TxType, TypedTransaction,
 };
 
 pub use alloy_eips::{
+    Typed2718,
     eip4844::{
+        Blob, BlobTransactionSidecar, Bytes48,
         builder::{SidecarBuilder, SidecarCoder, SimpleCoder},
-        utils, Blob, BlobTransactionSidecar, Bytes48,
+        utils,
     },
     eip7594::{BlobTransactionSidecarEip7594, BlobTransactionSidecarVariant},
-    Typed2718,
 };
 
 #[cfg(feature = "kzg")]

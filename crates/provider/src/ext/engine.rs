@@ -1,7 +1,7 @@
 use crate::Provider;
 use alloy_eips::eip7685::RequestsOrHash;
 use alloy_network::Network;
-use alloy_primitives::{BlockHash, Bytes, B128, B256, U64};
+use alloy_primitives::{B128, B256, BlockHash, Bytes, U64};
 use alloy_rpc_types_engine::{
     BlobAndProofV1, BlobAndProofV2, ClientVersionV1, ExecutionPayloadBodiesV1,
     ExecutionPayloadBodiesV2, ExecutionPayloadBodiesV3, ExecutionPayloadEnvelopeV2,
@@ -682,7 +682,7 @@ mod eip8288_tests {
     use alloy_primitives::bytes;
     use alloy_rpc_types_engine::{BlobsBundleV2, RecursiveStarkV1};
     use alloy_transport::mock::Asserter;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     #[tokio::test]
     async fn eip8288_methods_encode_wire_parameters() {
@@ -770,5 +770,23 @@ mod eip8288_tests {
         assert_eq!(params(3), json!(["0x0101010101010101"]));
         assert_eq!(params(5), json!(["0x10", "0x2"]));
         assert!(requests[6].params().is_none());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy_rpc_types_engine::CAPABILITIES;
+
+    #[test]
+    fn capabilities_list_every_engine_api_method() {
+        // `engine_exchangeCapabilities` is how capabilities are exchanged, not one of them.
+        let methods = include_str!("engine.rs").split('"').filter(|s| {
+            s.len() > "engine_".len()
+                && s.starts_with("engine_")
+                && *s != "engine_exchangeCapabilities"
+        });
+        for method in methods {
+            assert!(CAPABILITIES.contains(&method), "{method} is missing from `CAPABILITIES`");
+        }
     }
 }
