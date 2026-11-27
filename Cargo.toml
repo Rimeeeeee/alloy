@@ -89,8 +89,8 @@ alloy-chains = { version = "0.2", default-features = false }
 alloy-eip2124 = { version = "0.2.0", default-features = false }
 alloy-eip2930 = { version = "0.2.3", default-features = false }
 alloy-eip7702 = { version = "0.6.3", default-features = false }
-alloy-eip7928 = { version = "0.4", git = "https://github.com/Rimeeeeee/eips", rev = "acdd8e7a993ab50a63f70e8f8fc98d2ec27f04d3", default-features = false }
-alloy-eip8141 = { git = "https://github.com/Rimeeeeee/eips", rev = "acdd8e7a993ab50a63f70e8f8fc98d2ec27f04d3", version = "0.2", default-features = false }
+alloy-eip7928 = { version = "0.4", git = "https://github.com/Rimeeeeee/eips", rev = "551d1c0ecc33fc1a6ac8db670aa4bb5e65828d28", default-features = false }
+alloy-eip8141 = { git = "https://github.com/Rimeeeeee/eips", rev = "551d1c0ecc33fc1a6ac8db670aa4bb5e65828d28", version = "0.2", default-features = false }
 
 # hardforks
 alloy-hardforks = "0.2.0"

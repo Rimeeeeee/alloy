@@ -289,7 +289,7 @@ dependencies = [
 [[package]]
 name = "alloy-eip7928"
 version = "0.4.13"
-source = "git+https://github.com/Rimeeeeee/eips?rev=acdd8e7a993ab50a63f70e8f8fc98d2ec27f04d3#acdd8e7a993ab50a63f70e8f8fc98d2ec27f04d3"
+source = "git+https://github.com/Rimeeeeee/eips?rev=551d1c0ecc33fc1a6ac8db670aa4bb5e65828d28#551d1c0ecc33fc1a6ac8db670aa4bb5e65828d28"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
@@ -303,7 +303,7 @@ dependencies = [
 [[package]]
 name = "alloy-eip8141"
 version = "0.2.0"
-source = "git+https://github.com/Rimeeeeee/eips?rev=acdd8e7a993ab50a63f70e8f8fc98d2ec27f04d3#acdd8e7a993ab50a63f70e8f8fc98d2ec27f04d3"
+source = "git+https://github.com/Rimeeeeee/eips?rev=551d1c0ecc33fc1a6ac8db670aa4bb5e65828d28#551d1c0ecc33fc1a6ac8db670aa4bb5e65828d28"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
