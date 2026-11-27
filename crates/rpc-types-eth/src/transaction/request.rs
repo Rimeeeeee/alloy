@@ -1,25 +1,28 @@
 //! Alloy basic Transaction Request type.
 
-use crate::{transaction::AccessList, FrameRequest, Transaction, TransactionTrait};
+use crate::{FrameRequest, Transaction, TransactionTrait, transaction::AccessList};
 use alloc::{
     string::{String, ToString},
     vec,
     vec::Vec,
 };
 use alloy_consensus::{
-    error::ValueError,
-    transaction::{Recovered, TxEip8141WithSidecar},
     BlobTransactionSidecarEip7594, BlobTransactionSidecarVariant, SignableTransaction, TxEip1559,
     TxEip2930, TxEip4844, TxEip4844Variant, TxEip4844WithSidecar, TxEip7702, TxEip8141, TxEnvelope,
     TxLegacy, TxType, Typed2718, TypedTransaction,
+    error::ValueError,
+    transaction::{Recovered, TxEip8141WithSidecar},
 };
 use alloy_eips::{
     eip7702::SignedAuthorization,
     eip8141::{Frame, FrameSignature, TransactionFees},
 };
 use alloy_network_primitives::{TransactionBuilder4844, TransactionBuilder7702};
-use alloy_primitives::{Address, Bytes, ChainId, Signature, TxKind, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, ChainId, Signature, TxKind, U256};
 use core::{hash::Hash, str::FromStr};
+
+#[cfg(feature = "serde")]
+use alloy_eips::eip4844::{Blob, BlobTransactionSidecar, Bytes48};
 
 /// Represents _all_ transaction requests to/from RPC.
 ///
@@ -147,7 +150,12 @@ pub struct TransactionRequest {
     /// Blob sidecar for EIP-4844 transactions.
     #[cfg_attr(
         feature = "serde",
-        serde(default, flatten, skip_serializing_if = "Option::is_none")
+        serde(
+            default,
+            flatten,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_flattened_sidecar"
+        )
     )]
     pub sidecar: Option<BlobTransactionSidecarVariant>,
     /// Authorization list for EIP-7702 transactions.
@@ -415,6 +423,14 @@ impl TransactionRequest {
         self.max_fee_per_gas.is_some() || self.max_priority_fee_per_gas.is_some()
     }
 
+    /// Returns true if `gas_price` is set together with `max_fee_per_gas` or
+    /// `max_priority_fee_per_gas`.
+    ///
+    /// Checks field presence, so zero-valued fee fields also conflict.
+    pub const fn has_conflicting_fee_fields(&self) -> bool {
+        self.gas_price.is_some() && self.has_eip1559_fields()
+    }
+
     /// Populate the `blob_versioned_hashes` key, if a sidecar exists. No
     /// effect otherwise.
     pub fn populate_blob_hashes(&mut self) {
@@ -670,7 +686,10 @@ impl TransactionRequest {
             return Err(ValueError::new(self, "Missing 'to' field for Eip7702 transaction."));
         };
         let Some(to_address) = to.to().copied() else {
-            return Err(ValueError::new(self, "The field `to` can only be of type TxKind::Call(Address). Please change it accordingly."));
+            return Err(ValueError::new(
+                self,
+                "The field `to` can only be of type TxKind::Call(Address). Please change it accordingly.",
+            ));
         };
         let Some(nonce) = self.nonce else {
             return Err(ValueError::new(self, "Missing 'nonce' field for Eip7702 transaction."));
@@ -762,9 +781,9 @@ impl TransactionRequest {
             blob_versioned_hashes: &hashes,
         };
         if allow_placeholders {
-            transaction.validate_unsigned()?;
+            transaction.validate_unsigned().map_err(frame_validation_error)?;
         } else {
-            transaction.validate()?;
+            transaction.validate().map_err(frame_validation_error)?;
         }
         Ok(FrameFields {
             fees,
@@ -1149,11 +1168,7 @@ impl TransactionRequest {
             missing.push("max_fee_per_blob_gas");
         }
 
-        if missing.is_empty() {
-            Ok(())
-        } else {
-            Err(missing)
-        }
+        if missing.is_empty() { Ok(()) } else { Err(missing) }
     }
 
     /// Check if all necessary keys are present to build a 1559 transaction,
@@ -1161,11 +1176,7 @@ impl TransactionRequest {
     pub fn complete_1559(&self) -> Result<(), Vec<&'static str>> {
         let mut missing = self.check_reqd_fields();
         self.check_1559_fields(&mut missing);
-        if missing.is_empty() {
-            Ok(())
-        } else {
-            Err(missing)
-        }
+        if missing.is_empty() { Ok(()) } else { Err(missing) }
     }
 
     /// Check if all necessary keys are present to build a 2930 transaction,
@@ -1178,11 +1189,7 @@ impl TransactionRequest {
             missing.push("access_list");
         }
 
-        if missing.is_empty() {
-            Ok(())
-        } else {
-            Err(missing)
-        }
+        if missing.is_empty() { Ok(()) } else { Err(missing) }
     }
 
     /// Check if all necessary keys are present to build a 7702 transaction,
@@ -1199,11 +1206,7 @@ impl TransactionRequest {
             missing.push("authorization_list");
         }
 
-        if missing.is_empty() {
-            Ok(())
-        } else {
-            Err(missing)
-        }
+        if missing.is_empty() { Ok(()) } else { Err(missing) }
     }
 
     /// Checks frame request completeness and structure, returning the first missing or invalid
@@ -1218,11 +1221,7 @@ impl TransactionRequest {
         let mut missing = self.check_reqd_fields();
         self.check_legacy_fields(&mut missing);
 
-        if missing.is_empty() {
-            Ok(())
-        } else {
-            Err(missing)
-        }
+        if missing.is_empty() { Ok(()) } else { Err(missing) }
     }
 
     /// Return the tx type this request can be built as. Computed by checking
@@ -1267,7 +1266,7 @@ impl TransactionRequest {
             TxType::Eip4844 => self.build_4844_with_sidecar().expect("checked)").into(),
             TxType::Eip7702 => self.build_7702().expect("checked)").into(),
             TxType::Eip8141 => {
-                return self.build_8141().map(Into::into).map_err(ValueError::into_value)
+                return self.build_8141().map(Into::into).map_err(ValueError::into_value);
             }
         })
     }
@@ -1599,11 +1598,7 @@ impl From<TxEnvelope> for TransactionRequest {
                 {
                     let from = tx.recover_signer().ok();
                     let tx: Self = tx.strip_signature().into();
-                    if let Some(from) = from {
-                        tx.from(from)
-                    } else {
-                        tx
-                    }
+                    if let Some(from) = from { tx.from(from) } else { tx }
                 }
 
                 #[cfg(not(feature = "k256"))]
@@ -1616,11 +1611,7 @@ impl From<TxEnvelope> for TransactionRequest {
                 {
                     let from = tx.recover_signer().ok();
                     let tx: Self = tx.strip_signature().into();
-                    if let Some(from) = from {
-                        tx.from(from)
-                    } else {
-                        tx
-                    }
+                    if let Some(from) = from { tx.from(from) } else { tx }
                 }
 
                 #[cfg(not(feature = "k256"))]
@@ -1633,11 +1624,7 @@ impl From<TxEnvelope> for TransactionRequest {
                 {
                     let from = tx.recover_signer().ok();
                     let tx: Self = tx.strip_signature().into();
-                    if let Some(from) = from {
-                        tx.from(from)
-                    } else {
-                        tx
-                    }
+                    if let Some(from) = from { tx.from(from) } else { tx }
                 }
 
                 #[cfg(not(feature = "k256"))]
@@ -1650,11 +1637,7 @@ impl From<TxEnvelope> for TransactionRequest {
                 {
                     let from = tx.recover_signer().ok();
                     let tx: Self = tx.strip_signature().into();
-                    if let Some(from) = from {
-                        tx.from(from)
-                    } else {
-                        tx
-                    }
+                    if let Some(from) = from { tx.from(from) } else { tx }
                 }
 
                 #[cfg(not(feature = "k256"))]
@@ -1667,11 +1650,7 @@ impl From<TxEnvelope> for TransactionRequest {
                 {
                     let from = tx.recover_signer().ok();
                     let tx: Self = tx.strip_signature().into();
-                    if let Some(from) = from {
-                        tx.from(from)
-                    } else {
-                        tx
-                    }
+                    if let Some(from) = from { tx.from(from) } else { tx }
                 }
 
                 #[cfg(not(feature = "k256"))]
@@ -1693,7 +1672,7 @@ pub(super) mod serde_bincode_compat {
         eip2930::AccessList,
         eip8141::{FrameAddress, FrameMode, FrameSignature},
     };
-    use alloy_primitives::{Address, Bytes, ChainId, TxKind, B256, U256};
+    use alloy_primitives::{Address, B256, Bytes, ChainId, TxKind, U256};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use serde_with::{DeserializeAs, SerializeAs};
 
@@ -1701,7 +1680,7 @@ pub(super) mod serde_bincode_compat {
     ///
     /// Intended to use with the [serde_with::serde_as] macro in the following way:
     /// ```rust
-    /// use alloy_rpc_types_eth::{serde_bincode_compat, transaction, TransactionRequest};
+    /// use alloy_rpc_types_eth::{TransactionRequest, serde_bincode_compat, transaction};
     /// use serde::{Deserialize, Serialize};
     /// use serde_with::serde_as;
     ///
@@ -1896,7 +1875,7 @@ pub(super) mod serde_bincode_compat {
         use alloy_primitives::U256;
         use arbitrary::Arbitrary;
         use bincode::config;
-        use rand::{rngs::StdRng, Rng, SeedableRng};
+        use rand::{Rng, SeedableRng, rngs::StdRng};
         use serde::{Deserialize, Serialize};
         use serde_with::serde_as;
 
@@ -2172,7 +2151,9 @@ pub struct BuildTransactionErr<T = TransactionRequest> {
 
 /// Error thrown when both `data` and `input` fields are set and not equal.
 #[derive(Debug, Default, thiserror::Error)]
-#[error("both \"data\" and \"input\" are set and not equal. Please use \"input\" to pass transaction call data")]
+#[error(
+    "both \"data\" and \"input\" are set and not equal. Please use \"input\" to pass transaction call data"
+)]
 #[doc(alias = "TxInputError")]
 #[non_exhaustive]
 pub struct TransactionInputError;
@@ -2187,11 +2168,84 @@ pub struct FillTransaction<T = TypedTransaction> {
     pub tx: T,
 }
 
+/// Deserializes the flattened [`TransactionRequest::sidecar`].
+///
+/// A flattened `Option<T>` turns every error of `T` into `None`, which would silently drop
+/// malformed blobs, commitments or proofs. Incomplete sidecars still give `None`, since clients
+/// such as viem send `blobs` without `commitments` and `proofs`. `proofs` and `cellProofs`
+/// together are an error, as they are for [`BlobTransactionSidecarVariant`].
+#[cfg(feature = "serde")]
+fn deserialize_flattened_sidecar<'de, D>(
+    deserializer: D,
+) -> Result<Option<BlobTransactionSidecarVariant>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(serde::Deserialize)]
+    #[serde(transparent)]
+    struct Blobs(#[serde(deserialize_with = "alloy_eips::eip4844::deserialize_blobs")] Vec<Blob>);
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SidecarFields {
+        blobs: Option<Blobs>,
+        commitments: Option<Vec<Bytes48>>,
+        proofs: Option<Vec<Bytes48>>,
+        cell_proofs: Option<Vec<Bytes48>>,
+    }
+
+    let fields = <SidecarFields as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(match (fields.blobs, fields.commitments, fields.proofs, fields.cell_proofs) {
+        (Some(Blobs(blobs)), Some(commitments), Some(proofs), None) => {
+            Some(BlobTransactionSidecar { blobs, commitments, proofs }.into())
+        }
+        (Some(Blobs(blobs)), Some(commitments), None, Some(cell_proofs)) => {
+            Some(BlobTransactionSidecarEip7594 { blobs, commitments, cell_proofs }.into())
+        }
+        (_, _, Some(_), Some(_)) => {
+            return Err(serde::de::Error::custom(
+                "Both 'cellProofs' and 'proofs' cannot be present",
+            ));
+        }
+        _ => None,
+    })
+}
+
+fn frame_validation_error(
+    error: alloy_consensus::transaction::eip8141::TxEip8141ValidationError,
+) -> &'static str {
+    use alloy_consensus::transaction::eip8141::TxEip8141ValidationError as Error;
+    match error {
+        Error::NonceKeys(reason) => reason,
+        Error::FrameCount(_) => "EIP-8141 transaction must contain between 1 and 64 frames",
+        Error::ExhaustedLegacyNonce => "EIP-8250 legacy nonce sequence is exhausted",
+        Error::AssertionSuffix => "EIP-7906 ASSERT frames must form a trailing suffix",
+        Error::BlobCount(_) => "too many blob versioned hashes",
+        Error::BlobVersion { .. } => "invalid EIP-4844 versioned hash",
+        Error::Signature { .. } => "invalid frame signature entry",
+        Error::ReservedFlags { .. } => "reserved EIP-8141 frame flag is set",
+        Error::ValueOutsideSenderFrame { .. } => "frame value is only valid in sender mode",
+        Error::ExecutionApprovalTarget { .. } => {
+            "execution approval target must resolve to the transaction sender"
+        }
+        Error::AtomicBatch { .. } => "invalid atomic EIP-8141 frame",
+        Error::ApprovalInAtomicBatch { .. } => {
+            "atomic batch frames must not approve payment or execution"
+        }
+        Error::ExpiryVerifier { .. } => "invalid expiry verifier frame",
+        Error::FrameGasOverflow => "total frame gas overflows u64",
+        Error::ExecutionGasLimit(_) => {
+            "EIP-8141 transaction exceeds the EIP-7825 execution gas cap"
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Authorization;
     use alloy_consensus::BlobTransactionSidecarEip7594;
+    use alloy_eips::eip4844::{Blob, BlobTransactionSidecar, Bytes48, kzg_to_versioned_hash};
     use alloy_primitives::b256;
     #[cfg(feature = "serde")]
     use alloy_serde::WithOtherFields;
@@ -2291,6 +2345,29 @@ mod tests {
         let req = serde_json::from_str::<TransactionRequest>(&json.to_string()).unwrap();
 
         assert!(req.sidecar.is_none()); // Sidecar won't be deserialized.
+
+        // `cellProofs` in place of `proofs` gives the EIP-7594 sidecar.
+        let mut json_7594 = json.clone();
+        json_7594["cellProofs"] = serde_json::json!([zero_48]);
+        let req = serde_json::from_value::<TransactionRequest>(json_7594).unwrap();
+        assert!(req.sidecar.as_ref().unwrap().is_eip7594());
+        let serialized = serde_json::to_string(&req).unwrap();
+        assert_eq!(serde_json::from_str::<TransactionRequest>(&serialized).unwrap(), req);
+
+        // `proofs` and `cellProofs` together are rejected.
+        let mut json_both = json.clone();
+        json_both["proofs"] = serde_json::json!([zero_48]);
+        json_both["cellProofs"] = serde_json::json!([zero_48]);
+        let err = serde_json::from_value::<TransactionRequest>(json_both).unwrap_err();
+        assert_eq!(err.to_string(), "Both 'cellProofs' and 'proofs' cannot be present");
+
+        json["blobs"] = serde_json::json!(["0x00"]);
+        let sidecar_err = serde_json::from_value::<BlobTransactionSidecarVariant>(
+            serde_json::json!({ "blobs": ["0x00"], "commitments": [], "proofs": [] }),
+        )
+        .unwrap_err();
+        let err = serde_json::from_value::<TransactionRequest>(json).unwrap_err();
+        assert_eq!(err.to_string(), sidecar_err.to_string());
     }
 
     #[test]
@@ -2425,8 +2502,6 @@ mod tests {
 
         // EIP-4844 with sidecar
         {
-            use alloy_eips::eip4844::{Blob, BlobTransactionSidecar};
-
             // Positive case
             let sidecar =
                 BlobTransactionSidecar::new(vec![Blob::repeat_byte(0xFA)], Vec::new(), Vec::new());
@@ -2487,8 +2562,6 @@ mod tests {
 
         // EIP-4844 with EIP-7594 sidecar
         {
-            use alloy_eips::eip4844::Blob;
-
             // Positive case
             let sidecar = BlobTransactionSidecarEip7594::new(
                 vec![Blob::repeat_byte(0xFA)],
@@ -2666,8 +2739,6 @@ mod tests {
 
     #[test]
     fn set_blob_sidecar_7594_populates_versioned_hashes() {
-        use alloy_eips::eip4844::{kzg_to_versioned_hash, Blob, Bytes48};
-
         // Create a sidecar with a known commitment
         let commitment = Bytes48::repeat_byte(0x42);
         let sidecar = BlobTransactionSidecarEip7594::new(

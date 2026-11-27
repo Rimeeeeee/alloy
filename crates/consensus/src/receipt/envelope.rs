@@ -1,20 +1,28 @@
 use crate::{
-    Eip2718DecodableReceipt, Eip2718EncodableReceipt, Eip658Value, FrameReceiptEnvelope,
+    Eip658Value, Eip2718DecodableReceipt, Eip2718EncodableReceipt, FrameReceiptEnvelope,
     InMemorySize, Receipt, ReceiptWithBloom, RlpDecodableReceipt, RlpEncodableReceipt, TxReceipt,
     TxType,
 };
 use alloc::vec::Vec;
 use alloy_eips::{
-    eip2718::{
-        Decodable2718, Eip2718Error, Eip2718Result, Encodable2718, IsTyped2718, EIP1559_TX_TYPE_ID,
-        EIP2930_TX_TYPE_ID, EIP4844_TX_TYPE_ID, EIP7702_TX_TYPE_ID, LEGACY_TX_TYPE_ID,
-    },
-    eip8141::{constants::FRAME_TX_TYPE, FrameReceiptPayload, FrameStatus},
     Typed2718,
+    eip2718::{
+        Decodable2718, EIP1559_TX_TYPE_ID, EIP2930_TX_TYPE_ID, EIP4844_TX_TYPE_ID,
+        EIP7702_TX_TYPE_ID, Eip2718Error, Eip2718Result, Encodable2718, IsTyped2718,
+        LEGACY_TX_TYPE_ID,
+    },
+    eip8141::{FrameReceiptPayload, FrameStatus, constants::FRAME_TX_TYPE},
 };
-use alloy_primitives::{logs_bloom, Bloom, Log};
+use alloy_primitives::{Bloom, Log, logs_bloom};
 use alloy_rlp::{BufMut, Decodable, Encodable, Header};
 use core::fmt;
+
+#[cfg(feature = "serde")]
+use {
+    super::status::Eip658Fields,
+    core::marker::PhantomData,
+    serde::de::{Error, IgnoredAny, MapAccess, Visitor},
+};
 
 /// Receipt envelope, as defined in [EIP-2718].
 ///
@@ -88,55 +96,133 @@ impl<'de, T: serde::Deserialize<'de> + Clone> serde::Deserialize<'de> for Receip
         }
 
         #[derive(serde::Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct ReceiptEnvelopeHelper<T> {
-            #[serde(default, rename = "type", with = "alloy_serde::quantity::opt")]
-            ty: Option<u8>,
-            #[serde(flatten)]
-            receipt: ReceiptWithBloom<Receipt<T>>,
-            payer: Option<alloy_primitives::Address>,
-            frame_receipts: Option<Vec<FrameReceipt<T>>>,
+        #[serde(field_identifier, rename_all = "camelCase")]
+        enum Field {
+            Type,
+            Status,
+            Root,
+            CumulativeGasUsed,
+            Logs,
+            LogsBloom,
+            Payer,
+            FrameReceipts,
+            #[serde(other)]
+            Ignore,
         }
 
-        let ReceiptEnvelopeHelper { ty, receipt, payer, frame_receipts } =
-            ReceiptEnvelopeHelper::<T>::deserialize(deserializer)?;
-        let ty = ty.unwrap_or(LEGACY_TX_TYPE_ID);
-        let ty = TxType::try_from(ty).map_err(serde::de::Error::custom)?;
-        if ty == TxType::Eip8141 {
-            let payer = payer.ok_or_else(|| serde::de::Error::missing_field("payer"))?;
-            let frame_receipts =
-                frame_receipts.ok_or_else(|| serde::de::Error::missing_field("frameReceipts"))?;
-            let frame_receipts = frame_receipts
-                .into_iter()
-                .map(|receipt| {
-                    let status = FrameStatus::try_from_u8(receipt.status).ok_or_else(|| {
-                        serde::de::Error::custom("invalid EIP-8141 frame receipt status")
-                    })?;
-                    if receipt.gas_used
-                        != receipt.execution_gas_used.saturating_add(receipt.state_gas_used)
-                    {
-                        return Err(serde::de::Error::custom("inconsistent frame gas used"));
+        #[derive(serde::Deserialize)]
+        struct TypeValue(#[serde(with = "alloy_serde::quantity::opt")] Option<u8>);
+
+        #[derive(serde::Deserialize)]
+        struct GasValue(#[serde(with = "alloy_serde::quantity")] u64);
+
+        struct EnvelopeVisitor<T>(PhantomData<fn() -> T>);
+
+        impl<'de, T: serde::Deserialize<'de> + Clone> Visitor<'de> for EnvelopeVisitor<T> {
+            type Value = ReceiptEnvelope<T>;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a receipt object")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut ty = None;
+                let mut payer: Option<Option<alloy_primitives::Address>> = None;
+                let mut frame_receipts: Option<Option<Vec<FrameReceipt<T>>>> = None;
+                let mut status = Eip658Fields::default();
+                let mut cumulative_gas_used = None;
+                let mut logs = None;
+                let mut logs_bloom = None;
+
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        Field::Type => read_once(&mut ty, "type", &mut map)?,
+                        Field::Status => status.status.read(&mut map)?,
+                        Field::Root => status.root.read(&mut map)?,
+                        Field::CumulativeGasUsed => {
+                            read_once(&mut cumulative_gas_used, "cumulativeGasUsed", &mut map)?
+                        }
+                        Field::Logs => read_once(&mut logs, "logs", &mut map)?,
+                        Field::LogsBloom => read_once(&mut logs_bloom, "logsBloom", &mut map)?,
+                        Field::Payer => read_once(&mut payer, "payer", &mut map)?,
+                        Field::FrameReceipts => {
+                            read_once(&mut frame_receipts, "frameReceipts", &mut map)?
+                        }
+                        Field::Ignore => {
+                            map.next_value::<IgnoredAny>()?;
+                        }
                     }
-                    Ok(alloy_eips::eip8141::FrameReceipt {
-                        status,
-                        gas_used: alloy_eips::eip8141::FrameGasUsed {
-                            execution: receipt.execution_gas_used,
-                            state: receipt.state_gas_used,
-                        },
-                        logs: receipt.logs,
-                    })
-                })
-                .collect::<Result<Vec<_>, D::Error>>()?;
-            let payload = FrameReceiptPayload {
-                cumulative_gas_used: receipt.receipt.cumulative_gas_used,
-                payer,
-                frame_receipts,
-            };
-            return Ok(Self::Eip8141(payload.into()));
+                }
+
+                let logs_bloom = logs_bloom.ok_or_else(|| Error::missing_field("logsBloom"))?;
+                let GasValue(cumulative_gas_used) =
+                    cumulative_gas_used.ok_or_else(|| Error::missing_field("cumulativeGasUsed"))?;
+                let logs = logs.ok_or_else(|| Error::missing_field("logs"))?;
+                let status = status.finish()?;
+
+                let ty = ty.and_then(|TypeValue(ty)| ty).unwrap_or(LEGACY_TX_TYPE_ID);
+                let ty = TxType::try_from(ty).map_err(Error::custom)?;
+                if ty == TxType::Eip8141 {
+                    let payer =
+                        payer.flatten().ok_or_else(|| serde::de::Error::missing_field("payer"))?;
+                    let frame_receipts = frame_receipts
+                        .flatten()
+                        .ok_or_else(|| serde::de::Error::missing_field("frameReceipts"))?;
+                    let frame_receipts = frame_receipts
+                        .into_iter()
+                        .map(|receipt| {
+                            let status =
+                                FrameStatus::try_from_u8(receipt.status).ok_or_else(|| {
+                                    serde::de::Error::custom(
+                                        "invalid EIP-8141 frame receipt status",
+                                    )
+                                })?;
+                            if receipt.gas_used
+                                != receipt.execution_gas_used.saturating_add(receipt.state_gas_used)
+                            {
+                                return Err(serde::de::Error::custom(
+                                    "inconsistent frame gas used",
+                                ));
+                            }
+                            Ok(alloy_eips::eip8141::FrameReceipt {
+                                status,
+                                gas_used: alloy_eips::eip8141::FrameGasUsed {
+                                    execution: receipt.execution_gas_used,
+                                    state: receipt.state_gas_used,
+                                },
+                                logs: receipt.logs,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, A::Error>>()?;
+                    let payload =
+                        FrameReceiptPayload { cumulative_gas_used, payer, frame_receipts };
+                    return Ok(ReceiptEnvelope::Eip8141(payload.into()));
+                }
+
+                ReceiptEnvelope::from_typed(
+                    ty,
+                    ReceiptWithBloom {
+                        receipt: Receipt { status, cumulative_gas_used, logs },
+                        logs_bloom,
+                    },
+                )
+                .map_err(|_| Error::custom("invalid receipt type"))
+            }
         }
 
-        Self::from_typed(ty, receipt)
-            .map_err(|_| serde::de::Error::custom("frame receipt requires a frame payload"))
+        fn read_once<'de, V: serde::Deserialize<'de>, A: MapAccess<'de>>(
+            slot: &mut Option<V>,
+            name: &'static str,
+            map: &mut A,
+        ) -> Result<(), A::Error> {
+            if slot.is_some() {
+                return Err(Error::duplicate_field(name));
+            }
+            *slot = Some(map.next_value()?);
+            Ok(())
+        }
+
+        deserializer.deserialize_map(EnvelopeVisitor(PhantomData))
     }
 }
 
@@ -306,7 +392,7 @@ impl<T> ReceiptEnvelope<T> {
                 return Err(crate::error::ValueError::new_static(
                     self,
                     "EIP-8141 receipts use FrameReceiptPayload",
-                ))
+                ));
             }
         })
     }
@@ -610,8 +696,8 @@ pub(crate) mod serde_bincode_compat {
     ///
     /// Intended to use with the [`serde_with::serde_as`] macro in the following way:
     /// ```rust
-    /// use alloy_consensus::{serde_bincode_compat, ReceiptEnvelope};
-    /// use serde::{de::DeserializeOwned, Deserialize, Serialize};
+    /// use alloy_consensus::{ReceiptEnvelope, serde_bincode_compat};
+    /// use serde::{Deserialize, Serialize, de::DeserializeOwned};
     /// use serde_with::serde_as;
     ///
     /// #[serde_as]
@@ -733,7 +819,7 @@ pub(crate) mod serde_bincode_compat {
 
     #[cfg(test)]
     mod tests {
-        use super::super::{serde_bincode_compat, ReceiptEnvelope};
+        use super::super::{ReceiptEnvelope, serde_bincode_compat};
         use alloy_primitives::Log;
         use arbitrary::Arbitrary;
         use bincode::config;
@@ -775,13 +861,15 @@ mod test {
     use crate::{
         Receipt, ReceiptEnvelope, RlpDecodableReceipt, RlpEncodableReceipt, TxReceipt, TxType,
     };
+    use alloc::{vec, vec::Vec};
     use alloy_eips::{
-        eip2718::{Decodable2718, Encodable2718},
+        eip2718::{Decodable2718, Eip2718Error, Encodable2718},
         eip8141::{
-            constants::FRAME_TX_TYPE, FrameGasUsed, FrameReceipt, FrameReceiptPayload, FrameStatus,
+            FrameGasUsed, FrameReceipt, FrameReceiptPayload, FrameStatus, constants::FRAME_TX_TYPE,
         },
     };
     use alloy_primitives::{Address, Bloom, Log};
+    use alloy_rlp::{Decodable, Header};
 
     #[cfg(feature = "serde")]
     #[test]
@@ -861,6 +949,116 @@ mod test {
         assert_eq!(decoded, envelope);
     }
 
+    /// Accepted and rejected JSON shapes, as text and as a `Value`, alone and flattened.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn deser_receipt_envelope_shapes() {
+        use crate::{Eip658Value, ReceiptWithBloom};
+        use alloy_primitives::{B256, Bloom, b256};
+
+        const ROOT: B256 =
+            b256!("284d35bf53b82ef480ab4208527325477439c64fb90ef518450f05ee151c8e10");
+
+        let bloom = Bloom::default();
+        let ok = Eip658Value::Eip658(true);
+        let failed = Eip658Value::Eip658(false);
+        let root = Eip658Value::PostState(ROOT);
+        let legacy = TxType::Legacy;
+
+        // Fields added to a receipt with `cumulativeGasUsed`, `logs` and `logsBloom`, and the
+        // expected result. `ROOT` stands for a valid state root.
+        let cases: &[(&str, Option<(TxType, Eip658Value)>)] = &[
+            // status vs root
+            (r#""status":"0x1""#, Some((legacy, ok))),
+            (r#""status":"0x0""#, Some((legacy, failed))),
+            (r#""root":"ROOT""#, Some((legacy, root))),
+            (r#""status":"0x1","root":"ROOT""#, Some((legacy, ok))),
+            (r#""root":"ROOT","status":"0x0""#, Some((legacy, failed))),
+            ("", None),
+            (r#""status":null"#, None),
+            (r#""status":"0x2""#, None),
+            (r#""root":"0x1""#, None),
+            // an invalid status falls back to a valid root, and a valid status ignores the root
+            (r#""status":"0x2","root":"ROOT""#, Some((legacy, root))),
+            (r#""status":[1],"root":"ROOT""#, Some((legacy, root))),
+            (r#""status":"0x1","root":{"a":1}"#, Some((legacy, ok))),
+            (r#""status":"0x2","root":"0x1""#, None),
+            // `type`
+            (r#""type":null,"status":"0x1""#, Some((legacy, ok))),
+            (r#""type":"0x0","status":"0x1""#, Some((legacy, ok))),
+            (r#""type":"0x1","status":"0x1""#, Some((TxType::Eip2930, ok))),
+            (r#""type":"0x2","status":"0x1""#, Some((TxType::Eip1559, ok))),
+            (r#""type":"0x5","status":"0x1""#, None),
+            (r#""type":"0x7f","status":"0x1""#, None),
+            (r#""type":true,"status":"0x1""#, None),
+            // unknown keys are ignored
+            (
+                r#""blockHash":"ROOT","status":"0x1","transactionIndex":"0x0","other":{"status":"0x0"}"#,
+                Some((legacy, ok)),
+            ),
+            (
+                r#""type":"0x2","gasUsed":"0x5208","status":"0x1","effectiveGasPrice":[1,2]"#,
+                Some((TxType::Eip1559, ok)),
+            ),
+            // escaped keys
+            (r#""\u0073tatus":"0x1","\u0074ype":"0x2""#, Some((TxType::Eip1559, ok))),
+        ];
+
+        // A `Value` keeps only the last of repeated keys, so these are only parsed from text.
+        let repeated: &[(&str, Option<(TxType, Eip658Value)>)] = &[
+            (r#""status":"0x1","status":"0x1""#, None),
+            (r#""status":"0x1","status":"0x1","root":"ROOT""#, Some((legacy, root))),
+            (r#""root":"ROOT","root":"ROOT""#, None),
+            (r#""status":"0x0","root":"ROOT","root":"0x1""#, Some((legacy, failed))),
+            (r#""type":"0x1","type":"0x1","status":"0x1""#, None),
+            (r#""cumulativeGasUsed":"0x1","status":"0x1""#, None),
+            (r#""logs":[],"status":"0x1""#, None),
+            (r#""logsBloom":"BLOOM","status":"0x1""#, None),
+        ];
+
+        #[derive(serde::Deserialize)]
+        struct Outer {
+            #[serde(flatten)]
+            receipt: ReceiptEnvelope<()>,
+            #[serde(rename = "blockHash")]
+            _block_hash: Option<B256>,
+        }
+
+        let check = |fields: &str, expected: Option<(TxType, Eip658Value)>, from_value: bool| {
+            let sep = if fields.is_empty() { "" } else { "," };
+            let json = format!(
+                r#"{{"cumulativeGasUsed":"0x1","logs":[],"logsBloom":"BLOOM"{sep}{fields}}}"#
+            )
+            .replace("BLOOM", &bloom.to_string())
+            .replace("ROOT", &ROOT.to_string());
+            let expected = expected.map(|(ty, status)| {
+                let receipt = Receipt { status, cumulative_gas_used: 1, logs: Vec::<()>::new() };
+                ReceiptEnvelope::from_typed(ty, ReceiptWithBloom { receipt, logs_bloom: bloom })
+                    .unwrap()
+            });
+
+            let envelope = serde_json::from_str::<ReceiptEnvelope<()>>(&json).ok();
+            assert_eq!(envelope, expected, "{json}");
+
+            // The receipt may be flattened into a larger object, which passes down all its keys.
+            let outer = serde_json::from_str::<Outer>(&json).ok().map(|outer| outer.receipt);
+            assert_eq!(outer, expected, "{json}");
+
+            if from_value {
+                let value = serde_json::from_str::<serde_json::Value>(&json).unwrap();
+                let envelope = serde_json::from_value::<ReceiptEnvelope<()>>(value).ok();
+                assert_eq!(envelope, expected, "{json}");
+            }
+        };
+
+        for &(fields, expected) in cases {
+            check(fields, expected, true);
+        }
+        for &(fields, expected) in repeated {
+            check(fields, expected, false);
+        }
+    }
+
     #[test]
     fn convert_envelope() {
         let receipt = Receipt::<Log>::default();
@@ -934,10 +1132,6 @@ mod test {
 
     #[test]
     fn tagged_legacy_receipt_envelope_is_rejected() {
-        use alloc::{vec, vec::Vec};
-        use alloy_eips::eip2718::{Decodable2718, Eip2718Error, Encodable2718};
-        use alloy_rlp::{Decodable, Header};
-
         let envelope = ReceiptEnvelope::<Log>::Legacy(Default::default());
         let encoded = envelope.encoded_2718();
         assert!(encoded[0] >= 0xc0, "sanity: legacy receipts are encoded as a bare RLP list");

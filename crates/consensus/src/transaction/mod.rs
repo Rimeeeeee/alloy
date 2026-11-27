@@ -3,7 +3,7 @@
 use crate::Signed;
 use alloc::{borrow::Cow, vec::Vec};
 use alloy_eips::{eip2930::AccessList, eip4844::DATA_GAS_PER_BLOB, eip7702::SignedAuthorization};
-use alloy_primitives::{keccak256, Address, Bytes, ChainId, Selector, TxHash, TxKind, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, ChainId, Selector, TxHash, TxKind, U256, keccak256};
 use auto_impl::auto_impl;
 use core::{any, fmt};
 
@@ -36,8 +36,9 @@ pub use eip4844_sidecar::TxEip4844Sidecar;
 
 // Re-export 4844 helpers.
 pub use alloy_eips::eip4844::{
+    Blob, BlobTransactionSidecar, Bytes48,
     builder::{SidecarBuilder, SidecarCoder, SimpleCoder},
-    utils as eip4844_utils, Blob, BlobTransactionSidecar, Bytes48,
+    utils as eip4844_utils,
 };
 
 pub mod pooled;
@@ -49,7 +50,7 @@ pub use pooled::{
 pub use either::Either;
 
 mod legacy;
-pub use legacy::{from_eip155_value, to_eip155_value, TxLegacy};
+pub use legacy::{TxLegacy, from_eip155_value, to_eip155_value};
 
 mod rlp;
 #[doc(hidden)]
@@ -120,6 +121,9 @@ pub trait Transaction: Typed2718 + fmt::Debug + any::Any + Send + Sync + 'static
     /// For legacy fee transactions this is `gas_price`.
     ///
     /// This is also commonly referred to as the "Gas Fee Cap".
+    ///
+    /// [`TxEip8141`] derives a compatibility estimate from its shared total fee budget;
+    /// it has no signed per-gas fee cap. See that type's documentation for pricing limits.
     fn max_fee_per_gas(&self) -> u128;
 
     /// Returns the maximum fee per gas without narrowing it to `u128`.
@@ -130,8 +134,8 @@ pub trait Transaction: Typed2718 + fmt::Debug + any::Any + Send + Sync + 'static
         U256::from(self.max_fee_per_gas())
     }
 
-    /// For dynamic fee transactions returns the Priority fee the caller is paying to the block
-    /// author.
+    /// For dynamic fee transactions returns the maximum priority fee per gas the caller is willing
+    /// to pay to the block author.
     ///
     /// This will return `None` for legacy fee transactions
     fn max_priority_fee_per_gas(&self) -> Option<u128>;
@@ -173,6 +177,10 @@ pub trait Transaction: Typed2718 + fmt::Debug + any::Any + Send + Sync + 'static
     /// Returns the effective gas price for the given base fee.
     ///
     /// If the transaction is a legacy fee transaction, the gas price is returned.
+    ///
+    /// Implementations with shared fee budgets, such as [`TxEip8141`], can only provide a
+    /// compatibility estimate here. This interface has no blob base fee or charged gas input;
+    /// it does not in general determine protocol `GASPRICE` or a realized receipt price.
     fn effective_gas_price(&self, base_fee: Option<u64>) -> u128;
 
     /// Returns the effective gas price without narrowing it to `u128`.
@@ -192,22 +200,12 @@ pub trait Transaction: Typed2718 + fmt::Debug + any::Any + Send + Sync + 'static
     ///
     /// For dynamic fee transactions: `min(max_fee_per_gas - base_fee, max_priority_fee_per_gas)`.
     /// For legacy fee transactions: `gas_price - base_fee`.
+    ///
+    /// Returns `None` if the per-gas cap is below the base fee. For [`TxEip8141`] this is a
+    /// compatibility estimate ignoring blob charges and settlement gas usage; `Some` does not
+    /// establish affordability of the shared budget at the block's base fees.
     fn effective_tip_per_gas(&self, base_fee: u64) -> Option<u128> {
-        let base_fee = base_fee as u128;
-
-        let max_fee_per_gas = self.max_fee_per_gas();
-
-        // Check if max_fee_per_gas is less than base_fee
-        if max_fee_per_gas < base_fee {
-            return None;
-        }
-
-        // Calculate the difference between max_fee_per_gas and base_fee
-        let fee = max_fee_per_gas - base_fee;
-
-        // Compare the fee with max_priority_fee_per_gas (or gas price for legacy fee transactions)
-        self.max_priority_fee_per_gas()
-            .map_or(Some(fee), |priority_fee| Some(fee.min(priority_fee)))
+        self.effective_tip_per_gas_u256(base_fee).map(|tip| tip.saturating_to())
     }
 
     /// Returns the effective tip without narrowing it to `u128`.
@@ -410,10 +408,31 @@ impl<T: TxHashRef + Clone> TxHashRef for Cow<'_, T> {
 mod tests {
     use crate::{Signed, TransactionEnvelope, TxEip1559, TxEnvelope, TxType};
     use alloy_primitives::Signature;
+    use serde::{Serialize, Serializer};
+
+    #[test]
+    fn test_flatten_only_envelope() {
+        #[derive(Debug, Clone, TransactionEnvelope)]
+        #[envelope(alloy_consensus = crate, tx_type_name = WrapperTxType)]
+        enum Wrapper {
+            #[envelope(flatten)]
+            Ethereum(TxEnvelope),
+        }
+
+        let tx: TxEnvelope = Signed::new_unhashed(
+            TxEip1559 { chain_id: 1, gas_limit: 21000, ..Default::default() },
+            Signature::new(Default::default(), Default::default(), Default::default()),
+        )
+        .into();
+
+        let json = serde_json::to_string(&tx).unwrap();
+        assert_eq!(serde_json::to_string(&Wrapper::Ethereum(tx.clone())).unwrap(), json);
+        let Wrapper::Ethereum(decoded) = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, tx);
+    }
 
     #[test]
     fn test_custom_envelope() {
-        use serde::{Serialize, Serializer};
         fn serialize_with<S: Serializer>(
             tx: &Signed<TxEip1559>,
             serializer: S,
