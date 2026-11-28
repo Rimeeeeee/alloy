@@ -1601,6 +1601,7 @@ impl TxEip8141Ref<'_> {
             .saturating_add(self.keyed_nonce_access_gas())
             .saturating_add(self.signature_verification_gas())
             .saturating_add(self.value_transfer_gas())
+            .saturating_add(self.recursive_stark_gas())
             // EIP-7976 charges every calldata byte as four floor tokens.
             .saturating_add(
                 self.frame_calldata_len()
@@ -2797,5 +2798,45 @@ mod tests {
             Err(DependencyValidationError::FrameFields)
         );
         assert_eq!(TxEip8141::collect_signature_dependencies([&TxEip8141::default()]), Ok(vec![]));
+    }
+
+    #[test]
+    fn dependency_proof_gas_is_charged_when_calldata_floor_binds() {
+        let declaration = SignatureDependency {
+            scheme: LEANSPHINCS_SCHEME,
+            data_hash: B256::ZERO,
+            verification_key_hash: B256::repeat_byte(7),
+        };
+        for count in [1, 2] {
+            let tx = TxEip8141 {
+                frames: vec![
+                    Frame {
+                        mode: FrameMode::DependencyVerify,
+                        limits: FrameLimits {
+                            execution: count * LEANSPHINCS_VERIFICATION_GAS,
+                            state: 0,
+                        },
+                        data: declaration.encode().repeat(count as usize).into(),
+                        ..Default::default()
+                    },
+                    Frame {
+                        mode: FrameMode::Sender,
+                        limits: FrameLimits { execution: 10_000, state: 123 },
+                        data: vec![0; 10_000].into(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            };
+            let expected = FRAME_TX_INTRINSIC_COST
+                + 2 * FRAME_TX_PER_FRAME_COST
+                + tx.frame_calldata_len() * 4 * FRAME_TX_TOTAL_COST_FLOOR_PER_TOKEN
+                + count * LEANSTARK_VERIFICATION_GAS;
+            assert!(tx.calculate_execution_gas_limit_with_token_cost(4) < expected);
+            assert_eq!(tx.calculate_calldata_floor(), expected);
+            assert_eq!(tx.as_frame_ref().calculate_calldata_floor(), expected);
+            assert_eq!(tx.calculate_gas_limit(), expected + 123);
+            assert_eq!(tx.signature_dependencies().unwrap().len(), 1);
+        }
     }
 }
