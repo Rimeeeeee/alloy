@@ -3,7 +3,7 @@
 use crate::Signed;
 use alloc::{borrow::Cow, vec::Vec};
 use alloy_eips::{eip2930::AccessList, eip4844::DATA_GAS_PER_BLOB, eip7702::SignedAuthorization};
-use alloy_primitives::{keccak256, Address, Bytes, ChainId, Selector, TxHash, TxKind, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, ChainId, Selector, TxHash, TxKind, U256, keccak256};
 use auto_impl::auto_impl;
 use core::{any, fmt};
 
@@ -36,8 +36,9 @@ pub use eip4844_sidecar::TxEip4844Sidecar;
 
 // Re-export 4844 helpers.
 pub use alloy_eips::eip4844::{
+    Blob, BlobTransactionSidecar, Bytes48,
     builder::{SidecarBuilder, SidecarCoder, SimpleCoder},
-    utils as eip4844_utils, Blob, BlobTransactionSidecar, Bytes48,
+    utils as eip4844_utils,
 };
 
 pub mod pooled;
@@ -49,7 +50,7 @@ pub use pooled::{
 pub use either::Either;
 
 mod legacy;
-pub use legacy::{from_eip155_value, to_eip155_value, TxLegacy};
+pub use legacy::{TxLegacy, from_eip155_value, to_eip155_value};
 
 mod rlp;
 #[doc(hidden)]
@@ -185,6 +186,10 @@ pub trait Transaction: Typed2718 + fmt::Debug + any::Any + Send + Sync + 'static
     /// Returns the effective gas price without narrowing it to `u128`.
     #[inline]
     fn effective_gas_price_u256(&self, base_fee: Option<u64>) -> U256 {
+        // Existing transaction implementations may override chain-specific fee rules.
+        if self.frame_transaction().is_none() {
+            return U256::from(self.effective_gas_price(base_fee));
+        }
         let max_fee = self.max_fee_per_gas_u256();
         let Some(base_fee) = base_fee else {
             return max_fee;
@@ -204,12 +209,17 @@ pub trait Transaction: Typed2718 + fmt::Debug + any::Any + Send + Sync + 'static
     /// compatibility estimate ignoring blob charges and settlement gas usage; `Some` does not
     /// establish affordability of the shared budget at the block's base fees.
     fn effective_tip_per_gas(&self, base_fee: u64) -> Option<u128> {
-        self.effective_tip_per_gas_u256(base_fee).map(|tip| tip.saturating_to())
+        // The wide default delegates here for non-frame transactions.
+        let fee = self.max_fee_per_gas_u256().checked_sub(U256::from(base_fee))?;
+        Some(self.max_priority_fee_per_gas_u256().map_or(fee, |tip| fee.min(tip)).saturating_to())
     }
 
     /// Returns the effective tip without narrowing it to `u128`.
     #[inline]
     fn effective_tip_per_gas_u256(&self, base_fee: u64) -> Option<U256> {
+        if self.frame_transaction().is_none() {
+            return self.effective_tip_per_gas(base_fee).map(U256::from);
+        }
         let fee = self.max_fee_per_gas_u256().checked_sub(U256::from(base_fee))?;
         Some(self.max_priority_fee_per_gas_u256().map_or(fee, |priority_fee| fee.min(priority_fee)))
     }
@@ -566,5 +576,28 @@ mod flatten_decode_tests {
             MyEnvelope::decode_2718_exact(&tagged),
             Err(Eip2718Error::UnexpectedType(0))
         ));
+    }
+}
+
+#[cfg(test)]
+mod fee_tests {
+    use super::*;
+
+    #[test]
+    fn default_tip_helpers_terminate() {
+        let legacy = TxLegacy { gas_price: 100, ..Default::default() };
+        let dynamic =
+            TxEip1559 { max_fee_per_gas: 100, max_priority_fee_per_gas: 20, ..Default::default() };
+        for (base_fee, legacy_tip, dynamic_tip) in [
+            (0, Some(100_u128), Some(20_u128)),
+            (90, Some(10), Some(10)),
+            (100, Some(0), Some(0)),
+            (101, None, None),
+        ] {
+            assert_eq!(legacy.effective_tip_per_gas(base_fee), legacy_tip);
+            assert_eq!(legacy.effective_tip_per_gas_u256(base_fee), legacy_tip.map(U256::from));
+            assert_eq!(dynamic.effective_tip_per_gas(base_fee), dynamic_tip);
+            assert_eq!(dynamic.effective_tip_per_gas_u256(base_fee), dynamic_tip.map(U256::from));
+        }
     }
 }
