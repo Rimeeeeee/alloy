@@ -209,7 +209,9 @@ pub trait Transaction: Typed2718 + fmt::Debug + any::Any + Send + Sync + 'static
     /// compatibility estimate ignoring blob charges and settlement gas usage; `Some` does not
     /// establish affordability of the shared budget at the block's base fees.
     fn effective_tip_per_gas(&self, base_fee: u64) -> Option<u128> {
-        self.effective_tip_per_gas_u256(base_fee).map(|tip| tip.saturating_to())
+        // The wide default delegates here for non-frame transactions.
+        let fee = self.max_fee_per_gas_u256().checked_sub(U256::from(base_fee))?;
+        Some(self.max_priority_fee_per_gas_u256().map_or(fee, |tip| fee.min(tip)).saturating_to())
     }
 
     /// Returns the effective tip without narrowing it to `u128`.
@@ -574,5 +576,28 @@ mod flatten_decode_tests {
             MyEnvelope::decode_2718_exact(&tagged),
             Err(Eip2718Error::UnexpectedType(0))
         ));
+    }
+}
+
+#[cfg(test)]
+mod fee_tests {
+    use super::*;
+
+    #[test]
+    fn default_tip_helpers_terminate() {
+        let legacy = TxLegacy { gas_price: 100, ..Default::default() };
+        let dynamic =
+            TxEip1559 { max_fee_per_gas: 100, max_priority_fee_per_gas: 20, ..Default::default() };
+        for (base_fee, legacy_tip, dynamic_tip) in [
+            (0, Some(100_u128), Some(20_u128)),
+            (90, Some(10), Some(10)),
+            (100, Some(0), Some(0)),
+            (101, None, None),
+        ] {
+            assert_eq!(legacy.effective_tip_per_gas(base_fee), legacy_tip);
+            assert_eq!(legacy.effective_tip_per_gas_u256(base_fee), legacy_tip.map(U256::from));
+            assert_eq!(dynamic.effective_tip_per_gas(base_fee), dynamic_tip);
+            assert_eq!(dynamic.effective_tip_per_gas_u256(base_fee), dynamic_tip.map(U256::from));
+        }
     }
 }
