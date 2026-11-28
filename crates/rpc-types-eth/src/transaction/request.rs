@@ -2241,7 +2241,7 @@ fn frame_validation_error(
         Error::AssertionSuffix => "EIP-7906 ASSERT frames must form a trailing suffix",
         Error::BlobCount(_) => "too many blob versioned hashes",
         Error::BlobVersion { .. } => "invalid EIP-4844 versioned hash",
-        Error::Signature { .. } => "invalid frame signature entry",
+        Error::Proof(_) => "invalid EIP-8141 proof prefix",
         Error::ReservedFlags { .. } => "reserved EIP-8141 frame flag is set",
         Error::ValueOutsideSenderFrame { .. } => "frame value is only valid in sender mode",
         Error::ExecutionApprovalTarget { .. } => {
