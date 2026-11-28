@@ -657,7 +657,7 @@ impl<Eip4844> EthereumTxEnvelope<Eip4844> {
                 return Err(ValueError::new_static(
                     self,
                     "EIP-8141 frame transactions do not have an outer transaction signature",
-                ))
+                ));
             }
         })
     }
@@ -1109,7 +1109,7 @@ mod tests {
     #[cfg(any(feature = "secp256k1", feature = "k256"))]
     use crate::transaction::SignerRecoverable;
     use crate::{
-        transaction::{Recovered, SignableTransaction},
+        transaction::{PooledTransaction, Recovered, SignableTransaction},
         Transaction, TxEip4844, TxEip4844WithSidecar,
     };
     use alloc::vec::Vec;
@@ -1223,7 +1223,9 @@ mod tests {
     fn test_decode_live_legacy_tx() {
         use alloy_primitives::address;
 
-        let raw_tx = alloy_primitives::bytes!("f9015482078b8505d21dba0083022ef1947a250d5630b4cf539739df2c5dacb4c659f2488d880c46549a521b13d8b8e47ff36ab50000000000000000000000000000000000000000000066ab5a608bd00a23f2fe000000000000000000000000000000000000000000000000000000000000008000000000000000000000000048c04ed5691981c42154c6167398f95e8f38a7ff00000000000000000000000000000000000000000000000000000000632ceac70000000000000000000000000000000000000000000000000000000000000002000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc20000000000000000000000006c6ee5e31d828de241282b9606c8e98ea48526e225a0c9077369501641a92ef7399ff81c21639ed4fd8fc69cb793cfa1dbfab342e10aa0615facb2f1bcf3274a354cfe384a38d0cc008a11c2dd23a69111bc6930ba27a8");
+        let raw_tx = alloy_primitives::bytes!(
+            "f9015482078b8505d21dba0083022ef1947a250d5630b4cf539739df2c5dacb4c659f2488d880c46549a521b13d8b8e47ff36ab50000000000000000000000000000000000000000000066ab5a608bd00a23f2fe000000000000000000000000000000000000000000000000000000000000008000000000000000000000000048c04ed5691981c42154c6167398f95e8f38a7ff00000000000000000000000000000000000000000000000000000000632ceac70000000000000000000000000000000000000000000000000000000000000002000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc20000000000000000000000006c6ee5e31d828de241282b9606c8e98ea48526e225a0c9077369501641a92ef7399ff81c21639ed4fd8fc69cb793cfa1dbfab342e10aa0615facb2f1bcf3274a354cfe384a38d0cc008a11c2dd23a69111bc6930ba27a8"
+        );
         let res = TxEnvelope::decode_2718(&mut raw_tx.as_ref()).unwrap();
         assert_eq!(res.tx_type(), TxType::Legacy);
 
@@ -1676,6 +1678,60 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn network_decode_rejects_mismatched_wrapper_lengths() {
+        let tx: TxEnvelope = TxEip1559::default().into_signed(Signature::test_signature()).into();
+        let payload = tx.encoded_2718();
+
+        // Cover empty, short and long RLP string headers, with both understated and overstated
+        // lengths. Supply the extra bytes so overstated lengths pass Header::decode.
+        for payload_length in [0, 2, 55, 56, payload.len() - 3, payload.len() + 4] {
+            let mut encoded = Vec::new();
+            alloy_rlp::Header { list: false, payload_length }.encode(&mut encoded);
+            encoded.extend_from_slice(&payload);
+            if payload_length > payload.len() {
+                encoded.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+            }
+
+            assert!(matches!(
+                TxEnvelope::network_decode(&mut encoded.as_slice()),
+                Err(Eip2718Error::RlpError(alloy_rlp::Error::UnexpectedLength))
+            ));
+            assert_eq!(
+                PooledTransaction::decode(&mut encoded.as_slice()).unwrap_err(),
+                alloy_rlp::Error::UnexpectedLength
+            );
+
+            let mut list = Vec::new();
+            alloy_rlp::Header { list: true, payload_length: encoded.len() }.encode(&mut list);
+            list.extend_from_slice(&encoded);
+            assert_eq!(
+                Vec::<TxEnvelope>::decode(&mut list.as_slice()).unwrap_err(),
+                alloy_rlp::Error::UnexpectedLength
+            );
+        }
+    }
+
+    #[test]
+    fn network_decode_preserves_unwrapped_transactions() {
+        // Exercise both short and long canonical RLP string headers.
+        for signature in
+            [Signature::new(U256::ZERO, U256::ZERO, false), Signature::test_signature()]
+        {
+            let tx: TxEnvelope = TxEip1559::default().into_signed(signature).into();
+            for mut encoded in [alloy_rlp::encode(&tx), tx.encoded_2718()] {
+                let mut buf = encoded.as_slice();
+                assert_eq!(TxEnvelope::network_decode(&mut buf).unwrap(), tx);
+                assert!(buf.is_empty());
+
+                encoded.extend_from_slice(&[0x80, 0xc0]);
+                let mut buf = encoded.as_slice();
+                assert_eq!(TxEnvelope::decode(&mut buf).unwrap(), tx);
+                assert_eq!(buf, &[0x80, 0xc0]);
+            }
+        }
+    }
+
     #[cfg(feature = "serde")]
     fn test_serde_roundtrip<T: SignableTransaction<Signature>>(tx: T)
     where
@@ -1958,7 +2014,9 @@ mod tests {
     // <https://sepolia.etherscan.io/getRawTx?tx=0xe5b458ba9de30b47cb7c0ea836bec7b072053123a7416c5082c97f959a4eebd6>
     #[test]
     fn decode_raw_legacy() {
-        let raw = hex!("f8aa0285018ef61d0a832dc6c094cb33aa5b38d79e3d9fa8b10aff38aa201399a7e380b844af7b421018842e4628f3d9ee0e2c7679e29ed5dbaa75be75efecd392943503c9c68adce800000000000000000000000000000000000000000000000000000000000000641ca05e28679806caa50d25e9cb16aef8c0c08b235241b8f6e9d86faadf70421ba664a02353bba82ef2c7ce4dd6695942399163160000272b14f9aa6cbadf011b76efa4");
+        let raw = hex!(
+            "f8aa0285018ef61d0a832dc6c094cb33aa5b38d79e3d9fa8b10aff38aa201399a7e380b844af7b421018842e4628f3d9ee0e2c7679e29ed5dbaa75be75efecd392943503c9c68adce800000000000000000000000000000000000000000000000000000000000000641ca05e28679806caa50d25e9cb16aef8c0c08b235241b8f6e9d86faadf70421ba664a02353bba82ef2c7ce4dd6695942399163160000272b14f9aa6cbadf011b76efa4"
+        );
         let tx = TxEnvelope::decode_2718(&mut raw.as_ref()).unwrap();
         assert!(tx.chain_id().is_none());
     }
@@ -2091,7 +2149,9 @@ mod tests {
         use alloy_primitives::address;
 
         // Test vector from https://etherscan.io/tx/0x280cde7cdefe4b188750e76c888f13bd05ce9a4d7767730feefe8a0e50ca6fc4
-        let raw_tx = alloy_primitives::bytes!("f9015482078b8505d21dba0083022ef1947a250d5630b4cf539739df2c5dacb4c659f2488d880c46549a521b13d8b8e47ff36ab50000000000000000000000000000000000000000000066ab5a608bd00a23f2fe000000000000000000000000000000000000000000000000000000000000008000000000000000000000000048c04ed5691981c42154c6167398f95e8f38a7ff00000000000000000000000000000000000000000000000000000000632ceac70000000000000000000000000000000000000000000000000000000000000002000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc20000000000000000000000006c6ee5e31d828de241282b9606c8e98ea48526e225a0c9077369501641a92ef7399ff81c21639ed4fd8fc69cb793cfa1dbfab342e10aa0615facb2f1bcf3274a354cfe384a38d0cc008a11c2dd23a69111bc6930ba27a8");
+        let raw_tx = alloy_primitives::bytes!(
+            "f9015482078b8505d21dba0083022ef1947a250d5630b4cf539739df2c5dacb4c659f2488d880c46549a521b13d8b8e47ff36ab50000000000000000000000000000000000000000000066ab5a608bd00a23f2fe000000000000000000000000000000000000000000000000000000000000008000000000000000000000000048c04ed5691981c42154c6167398f95e8f38a7ff00000000000000000000000000000000000000000000000000000000632ceac70000000000000000000000000000000000000000000000000000000000000002000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc20000000000000000000000006c6ee5e31d828de241282b9606c8e98ea48526e225a0c9077369501641a92ef7399ff81c21639ed4fd8fc69cb793cfa1dbfab342e10aa0615facb2f1bcf3274a354cfe384a38d0cc008a11c2dd23a69111bc6930ba27a8"
+        );
         let tx = TxEnvelope::decode_2718(&mut raw_tx.as_ref()).unwrap();
 
         // Recover using the standard unchecked method
@@ -2121,7 +2181,9 @@ mod tests {
         use alloy_primitives::address;
 
         // Legacy tx
-        let raw_legacy = alloy_primitives::bytes!("f9015482078b8505d21dba0083022ef1947a250d5630b4cf539739df2c5dacb4c659f2488d880c46549a521b13d8b8e47ff36ab50000000000000000000000000000000000000000000066ab5a608bd00a23f2fe000000000000000000000000000000000000000000000000000000000000008000000000000000000000000048c04ed5691981c42154c6167398f95e8f38a7ff00000000000000000000000000000000000000000000000000000000632ceac70000000000000000000000000000000000000000000000000000000000000002000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc20000000000000000000000006c6ee5e31d828de241282b9606c8e98ea48526e225a0c9077369501641a92ef7399ff81c21639ed4fd8fc69cb793cfa1dbfab342e10aa0615facb2f1bcf3274a354cfe384a38d0cc008a11c2dd23a69111bc6930ba27a8");
+        let raw_legacy = alloy_primitives::bytes!(
+            "f9015482078b8505d21dba0083022ef1947a250d5630b4cf539739df2c5dacb4c659f2488d880c46549a521b13d8b8e47ff36ab50000000000000000000000000000000000000000000066ab5a608bd00a23f2fe000000000000000000000000000000000000000000000000000000000000008000000000000000000000000048c04ed5691981c42154c6167398f95e8f38a7ff00000000000000000000000000000000000000000000000000000000632ceac70000000000000000000000000000000000000000000000000000000000000002000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc20000000000000000000000006c6ee5e31d828de241282b9606c8e98ea48526e225a0c9077369501641a92ef7399ff81c21639ed4fd8fc69cb793cfa1dbfab342e10aa0615facb2f1bcf3274a354cfe384a38d0cc008a11c2dd23a69111bc6930ba27a8"
+        );
         let tx_legacy = TxEnvelope::decode_2718(&mut raw_legacy.as_ref()).unwrap();
 
         // EIP-1559 tx
@@ -2139,5 +2201,87 @@ mod tests {
 
         // Verify that the buffer was properly reused (no allocation needed between calls)
         assert!(!buf.is_empty());
+    }
+}
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod fuzz_tests {
+    use super::*;
+    use alloy_eips::eip2718::Decodable2718;
+    use alloy_rlp::{Decodable, Header};
+    use arbitrary::{Arbitrary, Unstructured};
+    use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
+
+    fn arbitrary_envelope(seed: u64) -> EthereumTxEnvelope<TxEip4844> {
+        let mut bytes = [0u8; 16 * 1024];
+        StdRng::seed_from_u64(seed).fill_bytes(&mut bytes);
+        EthereumTxEnvelope::arbitrary(&mut Unstructured::new(&bytes)).unwrap()
+    }
+
+    #[test]
+    fn fuzz_network_decode_roundtrip() {
+        for seed in 0..256 {
+            let tx = arbitrary_envelope(seed);
+            let network = alloy_rlp::encode(&tx);
+
+            for mut encoded in [network.clone(), tx.encoded_2718()] {
+                let mut buf = encoded.as_slice();
+                let decoded = EthereumTxEnvelope::<TxEip4844>::network_decode(&mut buf).unwrap();
+                assert_eq!(decoded, tx, "seed {seed}");
+                assert!(buf.is_empty(), "seed {seed}");
+                assert_eq!(alloy_rlp::encode(&decoded), network, "seed {seed}");
+
+                // Both wrapped and unwrapped inputs must leave the next transaction untouched.
+                encoded.extend_from_slice(&network);
+                let mut buf = encoded.as_slice();
+                assert_eq!(
+                    EthereumTxEnvelope::<TxEip4844>::decode(&mut buf).unwrap(),
+                    tx,
+                    "seed {seed}"
+                );
+                assert_eq!(buf, network, "seed {seed}");
+            }
+        }
+    }
+
+    #[test]
+    fn fuzz_network_decode_rejects_mismatched_wrapper_lengths() {
+        for seed in 0..256 {
+            let tx = arbitrary_envelope(seed);
+            if tx.is_legacy() {
+                continue;
+            }
+
+            let payload = tx.encoded_2718();
+            let mut rng = StdRng::seed_from_u64(seed);
+            // A one-byte wrapper around the type byte is already rejected as non-canonical RLP.
+            let short = rng.gen_range(2..payload.len());
+            let long = payload.len() + rng.gen_range(1..=32);
+            for payload_length in [short, long] {
+                let mut encoded = Vec::new();
+                Header { list: false, payload_length }.encode(&mut encoded);
+                encoded.extend_from_slice(&payload);
+                if payload_length > payload.len() {
+                    encoded.resize(encoded.len() + payload_length - payload.len(), 0x80);
+                }
+
+                assert_eq!(
+                    EthereumTxEnvelope::<TxEip4844>::decode(&mut encoded.as_slice()).unwrap_err(),
+                    alloy_rlp::Error::UnexpectedLength,
+                    "seed {seed}, declared {payload_length}, actual {}",
+                    payload.len()
+                );
+
+                let mut list = Vec::new();
+                Header { list: true, payload_length: encoded.len() }.encode(&mut list);
+                list.extend_from_slice(&encoded);
+                assert_eq!(
+                    Vec::<EthereumTxEnvelope<TxEip4844>>::decode(&mut list.as_slice()).unwrap_err(),
+                    alloy_rlp::Error::UnexpectedLength,
+                    "seed {seed}, declared {payload_length}, actual {}",
+                    payload.len()
+                );
+            }
+        }
     }
 }

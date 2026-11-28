@@ -39,12 +39,11 @@ pub mod serde_bincode_compat {
 /// This represents a transaction in RPC format (`eth_getTransactionByHash`) and contains the full
 /// transaction object and additional block metadata if the transaction has been mined.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize))]
 #[cfg_attr(all(any(test, feature = "arbitrary"), feature = "k256"), derive(arbitrary::Arbitrary))]
 #[cfg_attr(
     feature = "serde",
     serde(
-        into = "tx_serde::TransactionSerdeHelper<T>",
         try_from = "tx_serde::TransactionSerdeHelper<T>",
         bound = "T: TransactionTrait + Clone + serde::Serialize + serde::de::DeserializeOwned"
     )
@@ -180,6 +179,10 @@ where
     }
 
     /// Converts a consensus `tx` with an additional context `tx_info` into an RPC [`Transaction`].
+    ///
+    /// The gas price is derived from the transaction's fee helpers. For shared fee budgets
+    /// (EIP-8141), this is a compatibility estimate: this context lacks the blob base fee and
+    /// charged gas needed for protocol `GASPRICE` and realized receipt pricing, respectively.
     pub fn from_transaction(tx: Recovered<T>, tx_info: TransactionInfo) -> Self {
         let TransactionInfo {
             block_hash,
@@ -191,7 +194,9 @@ where
         } = tx_info;
         let effective_gas_price = base_fee
             .map(|base_fee| {
-                tx.effective_tip_per_gas_u256(base_fee).unwrap_or_default() + U256::from(base_fee)
+                tx.effective_tip_per_gas_u256(base_fee)
+                    .unwrap_or_default()
+                    .saturating_add(U256::from(base_fee))
             })
             .unwrap_or_else(|| tx.max_fee_per_gas_u256());
 
@@ -453,6 +458,10 @@ impl<T: TransactionTrait> TransactionTrait for Transaction<T> {
         self.inner.effective_gas_price(base_fee)
     }
 
+    fn effective_tip_per_gas(&self, base_fee: u64) -> Option<u128> {
+        self.inner.effective_tip_per_gas(base_fee)
+    }
+
     fn is_dynamic_fee(&self) -> bool {
         self.inner.is_dynamic_fee()
     }
@@ -535,6 +544,7 @@ mod tx_serde {
         pub effective_gas_price: Option<U256>,
     }
 
+    /// Serializes using a borrowed inner transaction.
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
     pub(crate) struct TransactionSerdeHelper<T> {
@@ -600,36 +610,26 @@ mod tx_serde {
         }
     }
 
-    impl<T: TransactionTrait> From<Transaction<T>> for TransactionSerdeHelper<T> {
-        fn from(value: Transaction<T>) -> Self {
-            let Transaction {
+    impl<T: TransactionTrait + Serialize> Serialize for Transaction<T> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let inner = self.inner.inner();
+
+            // If inner transaction has its own `gasPrice` don't serialize it in the helper.
+            let effective_gas_price =
+                if inner.gas_price().is_none() { self.effective_gas_price } else { None };
+
+            let from =
+                if inner.frame_transaction().is_some() { None } else { Some(self.inner.signer()) };
+            TransactionSerdeHelper {
                 inner,
-                block_hash,
-                block_number,
-                transaction_index,
-                effective_gas_price,
-                block_timestamp,
-            } = value;
-
-            let (inner, from) = inner.into_parts();
-
-            let effective_gas_price = if inner.gas_price().is_none() {
-                effective_gas_price
-            } else {
-                // If inner transaction has its own `gasPrice` don't serialize it in this struct.
-                None
-            };
-
-            let from = if inner.frame_transaction().is_some() { None } else { Some(from) };
-            Self {
-                inner,
-                block_hash,
-                block_number,
-                transaction_index,
+                block_hash: self.block_hash,
+                block_number: self.block_number,
+                transaction_index: self.transaction_index,
                 from,
                 gas_price: MaybeGasPrice { effective_gas_price },
-                block_timestamp,
+                block_timestamp: self.block_timestamp,
             }
+            .serialize(serializer)
         }
     }
 
@@ -674,6 +674,59 @@ mod tests {
     use alloy_consensus::SignableTransaction;
     #[cfg(feature = "serde")]
     use alloy_primitives::Signature;
+    #[test]
+    fn from_transaction_preserves_full_width_frame_fee_estimate() {
+        use alloy_consensus::TxEip8141;
+        use alloy_eips::eip8141::Frame;
+        use alloy_primitives::U256;
+
+        let mut tx = TxEip8141 { frames: vec![Frame::default()], ..Default::default() };
+        tx.fees.max_fee = (U256::from(u128::MAX) + U256::from(1)) * U256::from(tx.gas_limit());
+        tx.fees.max_priority_fee_per_gas = U256::MAX;
+        let expected = tx.effective_gas_price_u256(Some(1));
+        assert_eq!(tx.effective_tip_per_gas(1), Some(u128::MAX));
+        let rpc = Transaction::from_transaction(
+            Recovered::new_unchecked(tx, Address::ZERO),
+            TransactionInfo::default().with_base_fee(1),
+        );
+        assert_eq!(rpc.effective_gas_price, Some(expected));
+        assert_eq!(expected, U256::from(u128::MAX) + U256::from(1));
+        assert_eq!(rpc.effective_tip_per_gas(1), Some(u128::MAX));
+    }
+
+    #[test]
+    fn from_transaction_preserves_ordinary_fee_prices() {
+        use alloy_consensus::{TxEip1559, TxLegacy};
+
+        for (base, expected) in [(None, 100), (Some(80), 90), (Some(95), 100), (Some(101), 101)] {
+            let info = TransactionInfo { base_fee: base, ..Default::default() };
+            let tx = TxEip1559 {
+                max_fee_per_gas: 100,
+                max_priority_fee_per_gas: 10,
+                ..Default::default()
+            };
+            let rpc =
+                Transaction::from_transaction(Recovered::new_unchecked(tx, Address::ZERO), info);
+            assert_eq!(rpc.effective_gas_price, Some(U256::from(expected)));
+            let tx = TxLegacy { gas_price: 100, ..Default::default() };
+            let rpc =
+                Transaction::from_transaction(Recovered::new_unchecked(tx, Address::ZERO), info);
+            assert_eq!(
+                rpc.effective_gas_price,
+                Some(U256::from(base.map_or(100, |b| u128::from(b).max(100))))
+            );
+        }
+        let tx = TxEip1559 {
+            max_fee_per_gas: u128::MAX,
+            max_priority_fee_per_gas: u128::MAX,
+            ..Default::default()
+        };
+        let rpc = Transaction::from_transaction(
+            Recovered::new_unchecked(tx, Address::ZERO),
+            TransactionInfo::default().with_base_fee(u64::MAX),
+        );
+        assert_eq!(rpc.effective_gas_price, Some(U256::from(u128::MAX)));
+    }
 
     #[allow(unused)]
     fn assert_convert_into_envelope(tx: Transaction) -> TxEnvelope {
@@ -738,7 +791,7 @@ mod tests {
 
         let legacy_tx = serde_json::from_str::<Transaction>(legacy_rpc_tx).unwrap();
         assert_eq!(legacy_tx.block_number, Some(4));
-        assert_eq!(legacy_tx.effective_gas_price, Some(U256::from(0x23237dee)));
+        assert_eq!(legacy_tx.effective_gas_price, Some(U256::from(0x23237deeu64)));
     }
 
     #[test]
@@ -775,6 +828,24 @@ mod tests {
             assert_eq!(value["gasPrice"], expected);
             assert_eq!(serde_json::from_value::<Transaction>(value).unwrap(), rpc);
         }
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn serialize_gas_price() {
+        // Legacy: `gasPrice` comes from the inner transaction.
+        let legacy = r#"{"blockHash":"0x7e5d03caac4eb2b613ae9c919ef3afcc8ed0e384f31ee746381d3c8739475d2a","blockNumber":"0x4","transactionIndex":"0x0","from":"0x7435ed30a8b4aeb0877cef0c6e8cffe834eb865f","gas":"0x5208","gasPrice":"0x23237dee","hash":"0x3f38cdc805c02e152bfed34471a3a13a786fed436b3aec0c3eca35d23e2cdd2c","input":"0x","nonce":"0xc","to":"0x4dde844b71bcdf95512fb4dc94e84fb67b512ed8","value":"0x1","type":"0x0","chainId":"0xc72dd9d5e883e","v":"0x18e5bb3abd10a0","r":"0x3d61f5d7e93eecd0669a31eb640ab3349e9e5868a44c2be1337c90a893b51990","s":"0xc55f44ba123af37d0e73ed75e578647c3f473805349936f64ea902ea9e03bc7"}"#;
+        let tx = serde_json::from_str::<Transaction>(legacy).unwrap();
+        assert_eq!(tx.effective_gas_price, Some(U256::from(0x23237deeu64)));
+        let value = serde_json::to_value(&tx).unwrap();
+        assert_eq!(value, serde_json::from_str::<serde_json::Value>(legacy).unwrap());
+
+        // EIP-1559: `gasPrice` is the effective gas price.
+        let eip1559 = r#"{"blockHash":"0x883f974b17ca7b28cb970798d1c80f4d4bb427473dc6d39b2a7fe24edc02902d","blockNumber":"0xe26e6d","transactionIndex":"0xad","from":"0x3cf412d970474804623bb4e3a42de13f9bca5436","gas":"0x46a02","gasPrice":"0x50101df3a","maxFeePerGas":"0x7fc1a20a8","maxPriorityFeePerGas":"0x59682f00","hash":"0x0e07d8b53ed3d91314c80e53cf25bcde02084939395845cbb625b029d568135c","input":"0x","nonce":"0x16d","to":"0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45","value":"0x4a6ed55bbcc180","type":"0x2","accessList":[],"chainId":"0x1","v":"0x0","r":"0x7f2153019a74025d83a73effdd91503ceecefac7e35dd933adc1901c875539aa","s":"0x334ab2f714796d13c825fddf12aad01438db3a8152b2fe3ef7827707c25ecab3","yParity":"0x0"}"#;
+        let tx = serde_json::from_str::<Transaction>(eip1559).unwrap();
+        assert_eq!(tx.effective_gas_price, Some(U256::from(0x50101df3au64)));
+        let value = serde_json::to_value(&tx).unwrap();
+        assert_eq!(value, serde_json::from_str::<serde_json::Value>(eip1559).unwrap());
     }
 
     // <https://github.com/alloy-rs/alloy/issues/1643>
